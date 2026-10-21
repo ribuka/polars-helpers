@@ -6,11 +6,10 @@ Use it as ``import polars_helpers as plh``.
 from .cleaning import (
     drop_all_null_columns,
     drop_nested_type_columns,
-    validate_missing_ratio_threshold,
 )
 from .info import (
     get_columns,
-    get_numeric_args,
+    get_numeric_columns,
     get_schema,
     get_shape,
     get_unique_values,
@@ -24,12 +23,11 @@ __all__ = [
     "drop_all_null_columns",
     "drop_nested_type_columns",
     "get_columns",
-    "get_numeric_args",
+    "get_numeric_columns",
     "get_schema",
     "get_shape",
     "get_unique_values",
     "get_value_counts",
     "merge",
     "safe_write_csv",
-    "validate_missing_ratio_threshold",
 ]

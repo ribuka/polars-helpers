@@ -10,7 +10,7 @@ from .cleaning import drop_nested_type_columns
 
 
 def safe_write_csv(
-    df: pl.DataFrame, file_path: str | Path
+    df: pl.DataFrame, file_path: str | Path, verbose: bool = False
 ) -> None:
     """Write a frame to CSV after dropping columns CSV cannot represent.
 
@@ -21,7 +21,10 @@ def safe_write_csv(
         dropped first.
     file_path : str | Path
         Destination CSV path.
+    verbose : bool, default False
+        Whether to print the names of the dropped columns and the
+        destination path, which is intended for interactive notebook use.
     """
-    df = drop_nested_type_columns(df)  # ty:ignore[invalid-assignment]
-    df.write_csv(file_path)
-    print(f"Written csv to {file_path}")
+    drop_nested_type_columns(df, verbose).write_csv(file_path)
+    if verbose:
+        print(f"Written csv to {file_path}")

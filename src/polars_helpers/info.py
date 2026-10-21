@@ -60,18 +60,18 @@ def _collect(
     return selected
 
 
-def _value_counts_query(
-    df: pl.DataFrame | pl.LazyFrame,
-    alias: str,
+def _value_counts_query[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    df: FrameT,
+    column: str,
     sort: bool = True,
-) -> pl.DataFrame | pl.LazyFrame:
+) -> FrameT:
     """Build the per-value counts of one column without collecting it.
 
     Parameters
     ----------
     df : pl.DataFrame | pl.LazyFrame
         Frame containing the column to summarize.
-    alias : str
+    column : str
         Name of the column to count.
     sort : bool, default True
         Whether to sort by descending count, breaking ties by value.
@@ -82,15 +82,15 @@ def _value_counts_query(
         Distinct values with their ``count``, of the same kind as ``df``; a
         ``LazyFrame`` stays an unevaluated query.
     """
-    vc = df.group_by(cs.by_name(alias)).len(name="count")
+    vc = df.group_by(cs.by_name(column)).len(name="count")
     if sort:
-        vc = vc.sort([pl.col("count"), cs.by_name(alias)], descending=[True, False])
+        vc = vc.sort([pl.col("count"), cs.by_name(column)], descending=[True, False])
     return vc
 
 
-def get_value_counts(
-    df: pl.DataFrame | pl.LazyFrame,
-    alias: str,
+def get_value_counts[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    df: FrameT,
+    column: str,
     sort: bool = True,
 ) -> pl.DataFrame:
     """Count occurrences of each distinct value in one column.
@@ -102,7 +102,7 @@ def get_value_counts(
     ----------
     df : pl.DataFrame | pl.LazyFrame
         Frame containing the column to summarize.
-    alias : str
+    column : str
         Name of the column to count.
     sort : bool, default True
         Whether to sort the result by descending count, breaking ties by
@@ -119,7 +119,7 @@ def get_value_counts(
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
     _require_frame(df)
-    vc = _value_counts_query(df, alias, sort)
+    vc = _value_counts_query(df, column, sort)
     if isinstance(vc, pl.LazyFrame):
         return vc.collect()
     return vc
@@ -175,22 +175,22 @@ def get_columns(df: pl.DataFrame | pl.LazyFrame) -> list[str]:
 
 def get_schema(
     df: pl.DataFrame | pl.LazyFrame,
-    args: list[str] | None = None,
-) -> dict[str, pl.DataType]:
+    columns: list[str] | None = None,
+) -> pl.Schema:
     """Return the schema of a polars frame, optionally limited to columns.
 
     Parameters
     ----------
     df : pl.DataFrame | pl.LazyFrame
         Frame whose schema is resolved. A ``LazyFrame`` is not materialized.
-    args : list[str] | None, default None
+    columns : list[str] | None, default None
         Columns to restrict the schema to. If ``None`` or empty, the full
         schema is returned.
 
     Returns
     -------
-    dict[str, pl.DataType]
-        Column names mapped to their dtypes, in the order of ``args`` when
+    pl.Schema
+        Column names mapped to their dtypes, in the order of ``columns`` when
         given.
 
     Raises
@@ -198,21 +198,21 @@ def get_schema(
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     polars.exceptions.ColumnNotFoundError
-        If a name in ``args`` is not a column of ``df``.
+        If a name in ``columns`` is not a column of ``df``.
     """
     _require_frame(df)
     schema = df.collect_schema()
-    if not args:
+    if not columns:
         return schema
-    missing = [name for name in args if name not in schema]
+    missing = [name for name in columns if name not in schema]
     if missing:
         raise pl.exceptions.ColumnNotFoundError(f"columns not found: {missing}")
-    return pl.Schema({name: schema[name] for name in args})
+    return pl.Schema({name: schema[name] for name in columns})
 
 
-def get_numeric_args(
+def get_numeric_columns(
     df: pl.DataFrame,
-    args: list[str] | None = None,
+    columns: list[str] | None = None,
 ) -> list[str]:
     """Return numeric column names from a DataFrame.
 
@@ -220,7 +220,7 @@ def get_numeric_args(
     ----------
     df : pl.DataFrame
         Frame whose schema is inspected.
-    args : list[str] | None, default None
+    columns : list[str] | None, default None
         Candidate column names. If ``None`` or empty, every column is
         considered.
 
@@ -230,12 +230,12 @@ def get_numeric_args(
         Names of the candidate columns with a numeric dtype (integer,
         unsigned integer, floating point, or decimal).
     """
-    return [key for key, dtype in get_schema(df, args).items() if dtype.is_numeric()]
+    return [key for key, dtype in get_schema(df, columns).items() if dtype.is_numeric()]
 
 
 def get_unique_values(
     df: pl.DataFrame | pl.LazyFrame,
-    alias: str,
+    column: str,
     sort: bool = True,
 ) -> list[Any]:
     """Return one column's distinct non-null values.
@@ -244,7 +244,7 @@ def get_unique_values(
     ----------
     df : pl.DataFrame | pl.LazyFrame
         Frame containing the column.
-    alias : str
+    column : str
         Name of the column to read.
     sort : bool, default True
         Whether to sort the values. String columns are sorted with
@@ -261,8 +261,8 @@ def get_unique_values(
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
-    is_string = get_schema(df, [alias])[alias] == pl.String
-    expr = cs.by_name(alias).drop_nulls().unique()
+    is_string = get_schema(df, [column])[column] == pl.String
+    expr = cs.by_name(column).drop_nulls().unique()
     if sort and not is_string:
         expr = expr.sort()
     values = _collect(df, expr).to_series().to_list()

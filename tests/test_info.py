@@ -61,7 +61,7 @@ def test_get_columns_and_schema_keep_column_order(
 
 @pytest.mark.parametrize("lazy", [False, True])
 def test_get_schema_reads_listed_names_literally(lazy: bool) -> None:
-    """Look up ``args`` by name, so ``*`` is one column, not every column."""
+    """Look up ``columns`` by name, so ``*`` is one column, not every column."""
     frame = pl.DataFrame({"other": [1], "*": ["x"]})
     source = frame.lazy() if lazy else frame
 
@@ -98,11 +98,11 @@ def test_column_helpers_reject_non_frames(helper: Callable[..., object]) -> None
         helper({"a": [1]})
 
 
-def test_get_numeric_args_includes_every_numeric_dtype(
+def test_get_numeric_columns_includes_every_numeric_dtype(
     mixed_dtype_frame: pl.DataFrame,
 ) -> None:
     """Pick signed, unsigned, float, and decimal columns, in column order."""
-    assert plh.get_numeric_args(mixed_dtype_frame) == [
+    assert plh.get_numeric_columns(mixed_dtype_frame) == [
         "i8",
         "u32",
         "i64",
@@ -111,20 +111,20 @@ def test_get_numeric_args_includes_every_numeric_dtype(
     ]
 
 
-def test_get_numeric_args_includes_int128() -> None:
+def test_get_numeric_columns_includes_int128() -> None:
     """Pick ``Int128`` columns where polars supports them."""
     if not hasattr(pl, "Int128"):
         pytest.skip("this polars has no Int128")
     frame = pl.DataFrame({"big": pl.Series([1], dtype=pl.Int128), "s": ["a"]})
 
-    assert plh.get_numeric_args(frame) == ["big"]
+    assert plh.get_numeric_columns(frame) == ["big"]
 
 
-def test_get_numeric_args_limits_to_args(
+def test_get_numeric_columns_limits_to_columns(
     mixed_dtype_frame: pl.DataFrame,
 ) -> None:
     """Consider only the given candidate columns."""
-    assert plh.get_numeric_args(mixed_dtype_frame, ["text", "u32", "flag"]) == [
+    assert plh.get_numeric_columns(mixed_dtype_frame, ["text", "u32", "flag"]) == [
         "u32"
     ]
 
