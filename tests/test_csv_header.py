@@ -1,5 +1,6 @@
 """Tests for detecting the header line of a CSV preceded by metadata."""
 
+import csv
 from pathlib import Path
 
 import polars as pl
@@ -221,3 +222,32 @@ def test_scan_csv_returns_lazy_frame(tmp_path: Path) -> None:
     assert result.collect().equals(
         pl.DataFrame({"Time": [0, 1], "Pressure": [100, 101], "Temperature": [25, 26]})
     )
+
+
+def test_detect_csv_skip_lines_skips_unparsable_candidate(tmp_path: Path) -> None:
+    """Try later candidates when the lines from an earlier one fail to parse."""
+    path = tmp_path / "data.csv"
+    path.write_bytes(b"Meta: x\ry\n\na,b\n1,2\n3,4\n")
+
+    assert detect_csv_skip_lines(path) == 2
+
+
+def test_detect_csv_skip_lines_accepts_long_cells(tmp_path: Path) -> None:
+    """Accept cells longer than the default ``csv.field_size_limit``."""
+    limit = csv.field_size_limit()
+    long_cell = "x" * (limit + 1)
+    path = _write(tmp_path, f"Meta: x\n\nname,value\n{long_cell},1\ny,2\n")
+
+    assert detect_csv_skip_lines(path) == 2
+    assert csv.field_size_limit() == limit
+
+
+def test_read_csv_detects_with_encoding(tmp_path: Path) -> None:
+    """Decode the file with the given ``encoding`` for the detection too."""
+    path = tmp_path / "data.csv"
+    path.write_text("Metadata\n\na,b\n1,2\n3,4\n", encoding="utf-16")
+
+    df = plh.read_csv(path, encoding="utf-16")
+
+    assert df.columns == ["a", "b"]
+    assert df.height == 2

@@ -46,7 +46,7 @@ uv add "polars-helpers @ git+https://github.com/ribuka/polars-helpers.git"
 
 | Name | Description |
 |---|---|
-| `read_csv(source, **kwargs)` | `pl.read_csv(source, **kwargs)` with `skip_lines` detected by `detect_csv_skip_lines`, so that metadata lines above the header are skipped. `source` is a path; the `separator` and `quote_char` of `kwargs` are also used for the detection. Nothing is detected when `skip_lines` or `skip_rows` is given or `has_header=False`. Raises `ValueError` when the header cannot be detected with confidence. |
+| `read_csv(source, **kwargs)` | `pl.read_csv(source, **kwargs)` with `skip_lines` detected by `detect_csv_skip_lines`, so that metadata lines above the header are skipped. `source` is a path; the `separator`, `quote_char`, and `encoding` of `kwargs` are also used for the detection. Nothing is detected when `skip_lines` or `skip_rows` is given or `has_header=False`. Raises `ValueError` when the header cannot be detected with confidence. |
 | `scan_csv(source, **kwargs)` | The same for `pl.scan_csv`, returning a `pl.LazyFrame`; only the first lines are read for the detection. |
 
 ### Cleaning and output

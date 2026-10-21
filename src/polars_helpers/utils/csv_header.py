@@ -65,7 +65,7 @@ def _is_missing(cell: str) -> bool:
 
 def _parse(
     lines: Sequence[str], separator: str, quote_char: str | None
-) -> list[list[str]]:
+) -> list[list[str]] | None:
     """Parse physical lines into CSV records.
 
     Parameters
@@ -80,14 +80,23 @@ def _parse(
 
     Returns
     -------
-    list[list[str]]
-        Records; an empty line gives an empty record.
+    list[list[str]] | None
+        Records, where an empty line gives an empty record, or None when
+        the lines cannot be parsed as CSV. Cells are not limited by
+        ``csv.field_size_limit``, which is restored afterwards.
     """
     if quote_char is None:
         reader = csv.reader(lines, delimiter=separator, quoting=csv.QUOTE_NONE)
     else:
         reader = csv.reader(lines, delimiter=separator, quotechar=quote_char)
-    return list(reader)
+    limit = csv.field_size_limit()
+    csv.field_size_limit(max(limit, sum(len(line) for line in lines)))
+    try:
+        return list(reader)
+    except csv.Error:
+        return None
+    finally:
+        csv.field_size_limit(limit)
 
 
 def _forms_table(records: list[list[str]]) -> bool:
@@ -107,6 +116,8 @@ def _forms_table(records: list[list[str]]) -> bool:
         missing-value tokens), and the header is not numeric in at least
         one numeric column (when there is one).
     """
+    if not records:
+        return False
     width = len(records[0])
     if width < 2 or len(records) - 1 < _MIN_DATA_ROWS:
         return False
@@ -145,7 +156,8 @@ def detect_csv_skip_lines(
     numeric or free of numbers (ignoring missing-value tokens such as
     ``NA``), and, when there is a numeric column, the header is not
     numeric in at least one of them. Lines above a candidate are not
-    parsed, so an unclosed quote in the metadata does no harm.
+    parsed, and a candidate whose rest cannot be parsed is skipped, so an
+    unclosed quote in the metadata does no harm.
 
     Parameters
     ----------
@@ -197,6 +209,8 @@ def detect_csv_skip_lines(
         if _is_blank(line):
             continue
         records = _parse(lines[start:], separator, quote_char)
+        if records is None:
+            continue
         if truncated and len(records) > 1:
             records.pop()
         if not _forms_table(records):

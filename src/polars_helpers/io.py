@@ -10,6 +10,9 @@ import polars as pl
 from .cleaning import drop_nested_type_columns
 from .utils.csv_header import detect_csv_skip_lines
 
+# Polars names UTF-8 differently from Python; other names are Python codecs.
+_POLARS_UTF8_ENCODINGS = frozenset({"utf8", "utf8-lossy"})
+
 
 def _with_skip_lines(source: str | Path, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Add the detected ``skip_lines`` to the keyword arguments of a CSV reader.
@@ -20,7 +23,8 @@ def _with_skip_lines(source: str | Path, kwargs: dict[str, Any]) -> dict[str, An
         Path of the CSV file.
     kwargs : dict[str, Any]
         Keyword arguments for ``pl.read_csv`` or ``pl.scan_csv``. Their
-        ``separator`` and ``quote_char`` are used for the detection.
+        ``separator``, ``quote_char``, and ``encoding`` are used for the
+        detection.
 
     Returns
     -------
@@ -35,10 +39,12 @@ def _with_skip_lines(source: str | Path, kwargs: dict[str, Any]) -> dict[str, An
         or kwargs.get("has_header", True) is False
     ):
         return kwargs
+    encoding = kwargs.get("encoding", "utf8")
     skip_lines = detect_csv_skip_lines(
         source,
         separator=kwargs.get("separator", ","),
         quote_char=kwargs.get("quote_char", '"'),
+        encoding="utf-8-sig" if encoding in _POLARS_UTF8_ENCODINGS else encoding,
     )
     return {**kwargs, "skip_lines": skip_lines}
 
@@ -54,8 +60,8 @@ def read_csv(source: str | Path, **kwargs: Any) -> pl.DataFrame:  # noqa: ANN401
     source : str | Path
         Path of the CSV file.
     **kwargs : Any
-        Passed to ``pl.read_csv`` as they are. ``separator`` and
-        ``quote_char`` are also used for the detection. When
+        Passed to ``pl.read_csv`` as they are. ``separator``,
+        ``quote_char``, and ``encoding`` are also used for the detection. When
         ``skip_lines`` or ``skip_rows`` is given, or ``has_header`` is
         False, nothing is detected.
 
@@ -84,8 +90,8 @@ def scan_csv(source: str | Path, **kwargs: Any) -> pl.LazyFrame:  # noqa: ANN401
     source : str | Path
         Path of the CSV file.
     **kwargs : Any
-        Passed to ``pl.scan_csv`` as they are. ``separator`` and
-        ``quote_char`` are also used for the detection. When
+        Passed to ``pl.scan_csv`` as they are. ``separator``,
+        ``quote_char``, and ``encoding`` are also used for the detection. When
         ``skip_lines`` or ``skip_rows`` is given, or ``has_header`` is
         False, nothing is detected.
 
