@@ -6,7 +6,7 @@ from typing import Literal
 
 import polars as pl
 
-from .info import get_columns, get_shape, get_value_counts
+from .info import _value_counts_query, get_columns
 
 HOW = Literal["left", "right", "full", "inner"]
 
@@ -99,6 +99,11 @@ def _join_with_indicator(
         Joined frame, of the same kind as the inputs, with the keys of both
         sides coalesced into the left key columns.
     """
+    if indicator is None:
+        return left.join(
+            right, left_on=left_on, right_on=right_on, how=how, coalesce=True
+        )
+
     out = left.with_columns(pl.lit(True).alias(_IN_LEFT)).join(
         right.with_columns(pl.lit(True).alias(_IN_RIGHT)),
         left_on=left_on,
@@ -107,17 +112,52 @@ def _join_with_indicator(
         coalesce=True,
     )
 
-    if indicator is not None:
-        in_left = pl.col(_IN_LEFT).fill_null(False)
-        in_right = pl.col(_IN_RIGHT).fill_null(False)
-        out = out.with_columns(
-            pl.when(in_left & in_right).then(pl.lit("both"))
-            .when(in_left).then(pl.lit("left_only"))
-            .otherwise(pl.lit("right_only"))
-            .alias(indicator)
-        )
+    in_left = pl.col(_IN_LEFT).fill_null(False)
+    in_right = pl.col(_IN_RIGHT).fill_null(False)
+    out = out.with_columns(
+        pl.when(in_left & in_right).then(pl.lit("both"))
+        .when(in_left).then(pl.lit("left_only"))
+        .otherwise(pl.lit("right_only"))
+        .alias(indicator)
+    )
 
     return out.drop(_IN_LEFT, _IN_RIGHT)
+
+
+def _print_summary(
+    left: pl.DataFrame | pl.LazyFrame,
+    out: pl.DataFrame | pl.LazyFrame,
+    indicator: str | None,
+) -> None:
+    """Print the shape change of a merge and its merge-origin counts.
+
+    The merged ``LazyFrame`` is evaluated once: its row count is the sum of
+    the merge-origin counts, or a ``pl.len()`` aggregation when there is no
+    indicator, and both queries are collected together with the left row
+    count.
+
+    Parameters
+    ----------
+    left : pl.DataFrame | pl.LazyFrame
+        Left input of the merge.
+    out : pl.DataFrame | pl.LazyFrame
+        Merged frame, of the same kind as ``left``.
+    indicator : str | None
+        Name of the merge-origin column of ``out``, or ``None`` if absent.
+    """
+    out_query = (
+        out.select(pl.len()) if indicator is None
+        else _value_counts_query(out, indicator)
+    )
+    queries = [left.select(pl.len()), out_query]
+    left_len, out_stat = (
+        pl.collect_all(queries) if isinstance(out, pl.LazyFrame) else queries
+    )
+
+    out_rows = out_stat.item() if indicator is None else out_stat["count"].sum()
+    print(f"{(left_len.item(), len(get_columns(left)))} -> {(out_rows, len(get_columns(out)))}")
+    if indicator is not None:
+        print(out_stat)
 
 
 def merge(
@@ -179,9 +219,8 @@ def merge(
 
     left_keys, right_keys = _resolve_keys(on, left_on, right_on)
 
-    if columns is None:
-        columns = get_columns(right)
-    right = right.select(*right_keys, *(c for c in columns if c not in right_keys))
+    if columns is not None:
+        right = right.select(*right_keys, *(c for c in columns if c not in right_keys))
 
     if indicator is not None and indicator in {*get_columns(left), *get_columns(right)}:
         raise ValueError(f"indicator column {indicator!r} already exists")
@@ -189,8 +228,6 @@ def merge(
     out = _join_with_indicator(left, right, left_keys, right_keys, how, indicator)
 
     if verbose:
-        print(f"{get_shape(left)} -> {get_shape(out)}")
-        if indicator is not None:
-            print(get_value_counts(out, alias=indicator))
+        _print_summary(left, out, indicator)
 
     return out

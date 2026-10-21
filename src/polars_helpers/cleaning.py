@@ -128,5 +128,7 @@ def drop_all_null_columns(
         for col_name, missing_count in missing_counts.items()
         if missing_count / row_count <= threshold
     ]
+    if len(keep_cols) == len(missing_counts):
+        return frame
 
     return frame.select(keep_cols)

@@ -95,6 +95,18 @@ def test_drop_all_null_columns_returns_empty_frame_unchanged(lazy: bool) -> None
     assert result is source
 
 
+@pytest.mark.parametrize("lazy", [False, True])
+def test_drop_all_null_columns_returns_frame_unchanged_when_nothing_is_dropped(
+    mixed_missing_frame: pl.DataFrame, lazy: bool
+) -> None:
+    """Return the input as is when every column is within the threshold."""
+    source = mixed_missing_frame.lazy() if lazy else mixed_missing_frame
+
+    result = plh.drop_all_null_columns(source, threshold=1.0)
+
+    assert result is source
+
+
 def test_drop_all_null_columns_handles_frames_without_columns() -> None:
     """Accept a frame that has no columns."""
     frame = pl.DataFrame()

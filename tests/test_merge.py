@@ -166,6 +166,39 @@ def test_merge_verbose_prints_shape_and_origin_counts(
     assert out.index("both") < out.index("left_only")
 
 
+@pytest.mark.parametrize("indicator", ["_merge", None])
+def test_merge_verbose_runs_a_lazy_join_once(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    indicator: str | None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Evaluate the lazy join only once to print the verbose summary."""
+    calls = []
+
+    def count_calls(s: pl.Series) -> pl.Series:
+        calls.append(len(s))
+        return s
+
+    counted = right.lazy().with_columns(
+        pl.col("k").map_batches(count_calls, return_dtype=pl.Int64)
+    )
+
+    plh.merge(left.lazy(), counted, on=["k"], indicator=indicator, verbose=True)
+
+    assert len(calls) == 1
+    assert "(3, 2) -> (3, " in capsys.readouterr().out
+
+
+def test_merge_without_indicator_adds_no_temporary_flags(
+    left: pl.DataFrame, right: pl.DataFrame
+) -> None:
+    """Leave the temporary origin flags out of the query without an indicator."""
+    plan = plh.merge(left.lazy(), right.lazy(), on=["k"], indicator=None).explain(optimized=False)
+
+    assert "__polars_helpers_in" not in plan
+
+
 def test_merge_rejects_mixed_frame_kinds(left: pl.DataFrame, right: pl.DataFrame) -> None:
     """Reject a DataFrame merged with a LazyFrame."""
     with pytest.raises(TypeError, match="left: .* and right: .* must be the same type"):
