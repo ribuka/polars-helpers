@@ -66,6 +66,19 @@ def test_info_helpers_reject_non_frames(helper: Callable[..., object]) -> None:
         helper({"a": [1]})
 
 
+@pytest.mark.parametrize(
+    "helper",
+    [
+        lambda df: plh.get_value_counts(df, "a"),
+        lambda df: plh.get_schema(df, ["a"]),
+    ],
+)
+def test_column_helpers_reject_non_frames(helper: Callable[..., object]) -> None:
+    """Raise ``TypeError`` before selecting columns from a non-frame input."""
+    with pytest.raises(TypeError, match="must be a polars"):
+        helper({"a": [1]})
+
+
 def test_get_numeric_args_includes_every_numeric_dtype(
     mixed_dtype_frame: pl.DataFrame,
 ) -> None:
@@ -139,3 +152,17 @@ def test_get_value_counts_orders_by_count_then_value(lazy: bool) -> None:
     result = plh.get_value_counts(source, "k")
 
     assert result.rows() == [("c", 3), ("a", 2), ("b", 1), ("d", 1)]
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_column_helpers_read_wildcard_column_name_literally(lazy: bool) -> None:
+    """Read a column named ``*`` as itself, not as a wildcard."""
+    frame = pl.DataFrame({"other": [1, 1, 2], "*": ["x2", "x10", None]})
+    source = frame.lazy() if lazy else frame
+
+    assert plh.get_value_counts(source, "*").rows() == [
+        (None, 1),
+        ("x10", 1),
+        ("x2", 1),
+    ]
+    assert plh.get_unique_values(source, "*") == ["x2", "x10"]
