@@ -39,10 +39,3 @@ See the docstrings for arguments and details.
 | `drop_all_null_columns` | Drop columns that are (almost) entirely missing. |
 | `drop_nested_type_columns` | Drop List, Array, and Struct columns. |
 | `safe_write_csv` | Write a CSV after dropping nested-typed columns. |
-
-`polars_helpers.utils` holds helpers that do not depend on polars:
-
-| Name | Description |
-|---|---|
-| `detect_csv_skip_lines` | Number of metadata lines above the header of a CSV. |
-| `natural_keys` | Sort key that orders embedded numbers numerically. |
