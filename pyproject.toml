@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polars-helpers"
+dynamic = ["version"]
+description = "Small helpers for polars DataFrames and LazyFrames."
+readme = "README.md"
+requires-python = ">=3.13"
+# The lower bound is the oldest polars the CI `test-lowest` job tests;
+# 1.1 is the first release whose join accepts how="right".
+dependencies = [
+    "polars>=1.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.7",
+]
+
+[tool.hatch.version]
+path = "VERSION"
+pattern = '^(?P<version>\S+)\s*$'
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/polars_helpers"]
+
+[tool.uv]
+# The version comes from VERSION, so a change to it reinstalls the package.
+cache-keys = [{ file = "pyproject.toml" }, { file = "VERSION" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [".*", "tmp"]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "D", "ANN"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
