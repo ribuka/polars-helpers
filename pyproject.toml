@@ -17,6 +17,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pyright==1.1.414",
     "pytest==9.1.1",
     "ruff==0.16.7",
 ]
@@ -41,3 +42,6 @@ extend-select = ["I", "UP", "B", "D", "ANN"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
+
+[tool.pyright]
+include = ["src"]

@@ -54,6 +54,30 @@ def _validate_missing_ratio_threshold(threshold: float) -> None:
         raise ValueError("threshold must be between 0.0 and 1.0")
 
 
+def _missing_value_queries[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    df: FrameT, include_nan_missing: bool
+) -> list[FrameT]:
+    """Build the row-count and missing-value queries of ``df``.
+
+    Parameters
+    ----------
+    df : pl.DataFrame | pl.LazyFrame
+        Frame whose columns are evaluated.
+    include_nan_missing : bool
+        Whether to add a query counting NaNs of the floating-point columns.
+
+    Returns
+    -------
+    list[pl.DataFrame] | list[pl.LazyFrame]
+        Row count, null counts, and optionally NaN counts, each a one-row
+        frame of the same kind as ``df``.
+    """
+    queries = [df.select(pl.len()), df.null_count()]
+    if include_nan_missing:
+        queries.append(df.select(cs.float().is_nan().sum()))
+    return queries
+
+
 def _count_missing_values[FrameT: (pl.DataFrame, pl.LazyFrame)](
     df: FrameT,
     include_nan_missing: bool,
@@ -81,10 +105,10 @@ def _count_missing_values[FrameT: (pl.DataFrame, pl.LazyFrame)](
     tuple[int, dict[str, int]]
         Row count and missing-value count per column, in column order.
     """
-    queries = [df.select(pl.len()), df.null_count()]
-    if include_nan_missing:
-        queries.append(df.select(cs.float().is_nan().sum()))
-    stats = pl.collect_all(queries) if isinstance(df, pl.LazyFrame) else queries
+    if isinstance(df, pl.LazyFrame):
+        stats = pl.collect_all(_missing_value_queries(df, include_nan_missing))
+    else:
+        stats = _missing_value_queries(df, include_nan_missing)
 
     row_count = stats[0].item()
     missing_counts: dict[str, int] = {}

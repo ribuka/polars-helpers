@@ -63,8 +63,9 @@ Helpers that do not depend on polars. They are not exported from the top level.
 ```sh
 uv sync
 uv run -m ruff check .
+uv run -m pyright
 uv run -m pytest
 ```
 
-CI runs lint and the tests on every pull request to `main`, and runs the tests
-again with the lowest polars that `pyproject.toml` allows.
+CI runs lint, the type check, and the tests on every pull request to `main`,
+and runs the tests again with the lowest polars that `pyproject.toml` allows.

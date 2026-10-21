@@ -83,6 +83,26 @@ def _resolve_keys(
     return _as_list(left_on), _as_list(right_on)
 
 
+def _with_flag[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    frame: FrameT, name: str
+) -> FrameT:
+    """Add a column of ``True`` that marks the rows of one join side.
+
+    Parameters
+    ----------
+    frame : pl.DataFrame | pl.LazyFrame
+        Frame to mark.
+    name : str
+        Name of the flag column.
+
+    Returns
+    -------
+    pl.DataFrame | pl.LazyFrame
+        ``frame`` with the flag column, of the same kind as ``frame``.
+    """
+    return frame.with_columns(pl.lit(True).alias(name))
+
+
 def _join_with_indicator[FrameT: (pl.DataFrame, pl.LazyFrame)](
     left: FrameT,
     right: FrameT,
@@ -122,8 +142,8 @@ def _join_with_indicator[FrameT: (pl.DataFrame, pl.LazyFrame)](
             maintain_order=_MAINTAIN_ORDER[how],
         )
 
-    out = left.with_columns(pl.lit(True).alias(_IN_LEFT)).join(
-        right.with_columns(pl.lit(True).alias(_IN_RIGHT)),
+    out = _with_flag(left, _IN_LEFT).join(
+        _with_flag(right, _IN_RIGHT),
         left_on=left_on,
         right_on=right_on,
         how=how,
