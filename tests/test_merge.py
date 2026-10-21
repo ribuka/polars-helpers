@@ -30,96 +30,140 @@ def right() -> pl.DataFrame:
     return pl.DataFrame({"k": [2, 3, 4], "b": [20, 30, 40], "c": ["p", "q", "r"]})
 
 
-def _origin_counts(frame: pl.DataFrame, indicator: str = "_merge") -> dict[str, int]:
-    """Count the rows of each merge origin.
+def _origin_by_key(frame: pl.DataFrame, key: str = "k") -> dict[int, str]:
+    """Map each key to its merge origin.
 
     Parameters
     ----------
     frame : pl.DataFrame
-        Merged frame.
-    indicator : str, default "_merge"
-        Name of the merge-origin column.
+        Merged frame with the ``_merge`` column.
+    key : str, default "k"
+        Name of the key column.
 
     Returns
     -------
-    dict[str, int]
-        Row count per merge origin.
+    dict[int, str]
+        Merge origin per key.
     """
-    return dict(frame.group_by(indicator).len().iter_rows())
+    return dict(frame.select(key, "_merge").iter_rows())
 
 
 @pytest.mark.parametrize(
     ("how", "expected"),
     [
-        ("left", {"both": 2, "left_only": 1}),
-        ("right", {"both": 2, "right_only": 1}),
-        ("full", {"both": 2, "left_only": 1, "right_only": 1}),
-        ("inner", {"both": 2}),
+        ("left", {1: "left_only", 2: "both", 3: "both"}),
+        ("right", {2: "both", 3: "both", 4: "right_only"}),
+        ("full", {1: "left_only", 2: "both", 3: "both", 4: "right_only"}),
+        ("inner", {2: "both", 3: "both"}),
     ],
 )
-def test_merge_marks_row_origin(
+def test_merge_marks_row_origin_with_one_key_column(
     left: pl.DataFrame,
     right: pl.DataFrame,
     how: plh.HOW,
-    expected: dict[str, int],
+    expected: dict[int, str],
 ) -> None:
-    """Mark each row with where it came from for every join strategy."""
-    result = plh.merge(left, right, on=["k"], how=how, show_result=False)
+    """Mark each row's origin and coalesce the keys for every join strategy."""
+    result = plh.merge(left, right, on="k", how=how)
 
     assert isinstance(result, pl.DataFrame)
-    assert _origin_counts(result) == expected
+    assert sorted(result.columns) == ["_merge", "a", "b", "c", "k"]
+    assert _origin_by_key(result) == expected
 
 
 def test_merge_keeps_lazy_frames_lazy(left: pl.DataFrame, right: pl.DataFrame) -> None:
     """Return a LazyFrame matching the eager result for LazyFrame input."""
-    eager = plh.merge(left, right, on=["k"], show_result=False)
-    lazy = plh.merge(left.lazy(), right.lazy(), on=["k"], show_result=False)
+    eager = plh.merge(left, right, on=["k"])
+    lazy = plh.merge(left.lazy(), right.lazy(), on=["k"])
 
     assert isinstance(lazy, pl.LazyFrame)
     assert lazy.collect().equals(eager)
 
 
-def test_merge_takes_only_selected_columns(left: pl.DataFrame, right: pl.DataFrame) -> None:
-    """Take only ``columns`` from the right frame."""
-    result = plh.merge(left, right, columns=["k", "b"], on=["k"], show_result=False)
+@pytest.mark.parametrize("columns", [["k", "b"], ["b"]])
+def test_merge_takes_selected_columns_and_the_keys(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    columns: list[str],
+) -> None:
+    """Take only ``columns`` from the right frame, adding its keys if left out."""
+    result = plh.merge(left, right, columns=columns, on=["k"])
 
     assert result.columns == ["k", "a", "b", "_merge"]
 
 
-def test_merge_with_left_on_right_on_adds_right_key(left: pl.DataFrame) -> None:
-    """Join on differently named keys, taking the right key even if not listed."""
-    right = pl.DataFrame({"key": [1, 3], "b": [10, 30]})
+def test_merge_with_left_on_right_on_coalesces_into_left_key(left: pl.DataFrame) -> None:
+    """Join on differently named keys, keeping the left key name only."""
+    right = pl.DataFrame({"key": [1, 3, 5], "b": [10, 30, 50]})
     columns = ["b"]
 
-    result = plh.merge(
-        left, right, columns=columns, left_on="k", right_on="key", show_result=False,
-    )
+    result = plh.merge(left, right, columns=columns, left_on="k", right_on="key", how="full")
 
-    assert result["b"].to_list() == [10, None, 30]
-    assert _origin_counts(result) == {"both": 2, "left_only": 1}
+    assert result.columns == ["k", "a", "b", "_merge"]
+    assert _origin_by_key(result) == {1: "both", 2: "left_only", 3: "both", 5: "right_only"}
     assert columns == ["b"]
 
 
-def test_merge_names_or_omits_indicator(left: pl.DataFrame, right: pl.DataFrame) -> None:
-    """Name the indicator column as asked, or leave it out for ``False``."""
-    named = plh.merge(left, right, on=["k"], indicator="origin", show_result=False)
-    omitted = plh.merge(left, right, on=["k"], indicator=False, show_result=False)
+def test_merge_accepts_several_keys() -> None:
+    """Join on several key columns given as lists."""
+    left = pl.DataFrame({"x": [1, 1, 2], "y": ["a", "b", "a"], "v": [1, 2, 3]})
+    right = pl.DataFrame({"x2": [1, 2], "y2": ["b", "a"], "w": [10, 20]})
 
-    assert "origin" in named.columns
+    result = plh.merge(left, right, left_on=["x", "y"], right_on=["x2", "y2"])
+
+    assert result["w"].to_list() == [None, 10, 20]
+    assert result["_merge"].to_list() == ["left_only", "both", "both"]
+
+
+def test_merge_names_or_omits_indicator(left: pl.DataFrame, right: pl.DataFrame) -> None:
+    """Name the indicator column as asked, or leave it out for ``None``."""
+    named = plh.merge(left, right, on=["k"], indicator="origin")
+    omitted = plh.merge(left, right, on=["k"], indicator=None)
+
+    assert named.columns == ["k", "a", "b", "c", "origin"]
     assert omitted.columns == ["k", "a", "b", "c"]
 
 
-def test_merge_prints_shape_and_origin_counts(
+def test_merge_keeps_columns_named_like_its_temporary_flags(right: pl.DataFrame) -> None:
+    """Keep user columns that a naive implementation would use as flags."""
+    left = pl.DataFrame({"k": [1, 2], "in_left": ["p", "q"], "in_right": ["r", "s"]})
+
+    result = plh.merge(left, right, on=["k"])
+
+    assert result.columns == ["k", "in_left", "in_right", "b", "c", "_merge"]
+
+
+def test_merge_rejects_indicator_that_names_an_existing_column(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+) -> None:
+    """Refuse to overwrite a column with the indicator."""
+    with pytest.raises(ValueError, match="indicator column 'b' already exists"):
+        plh.merge(left, right, on=["k"], indicator="b")
+
+
+def test_merge_is_silent_by_default(
     left: pl.DataFrame,
     right: pl.DataFrame,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Print the shape change and the merge-origin counts by default."""
+    """Print nothing unless ``verbose`` is set."""
     plh.merge(left, right, on=["k"])
+
+    assert capsys.readouterr().out == ""
+
+
+def test_merge_verbose_prints_shape_and_origin_counts(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Print the shape change and the merge-origin counts with ``verbose``."""
+    plh.merge(left, right, on=["k"], verbose=True)
 
     out = capsys.readouterr().out
     assert "(3, 2) -> (3, 5)" in out
-    assert "left_only" in out
+    assert out.index("both") < out.index("left_only")
 
 
 def test_merge_rejects_mixed_frame_kinds(left: pl.DataFrame, right: pl.DataFrame) -> None:
@@ -128,7 +172,26 @@ def test_merge_rejects_mixed_frame_kinds(left: pl.DataFrame, right: pl.DataFrame
         plh.merge(left, right.lazy(), on=["k"])
 
 
-def test_merge_requires_keys(left: pl.DataFrame, right: pl.DataFrame) -> None:
-    """Reject a merge without ``on`` or both ``left_on`` and ``right_on``."""
-    with pytest.raises(ValueError, match="`left_on` and `right_on` must be specified"):
-        plh.merge(left, right, left_on="k", show_result=False)
+def test_merge_rejects_two_non_polars_values() -> None:
+    """Reject two values of the same type that are not polars frames."""
+    with pytest.raises(TypeError, match="must be the same type"):
+        plh.merge({"k": [1]}, {"k": [1]}, on=["k"])  # ty:ignore[invalid-argument-type]
+
+
+@pytest.mark.parametrize(
+    ("keys", "message"),
+    [
+        ({"left_on": "k"}, "`left_on` and `right_on` must be specified"),
+        ({}, "`left_on` and `right_on` must be specified"),
+        ({"on": "k", "left_on": "k", "right_on": "k"}, "not both"),
+    ],
+)
+def test_merge_requires_one_way_of_giving_keys(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    keys: dict[str, str],
+    message: str,
+) -> None:
+    """Accept either ``on`` or both ``left_on`` and ``right_on``."""
+    with pytest.raises(ValueError, match=message):
+        plh.merge(left, right, **keys)  # ty:ignore[invalid-argument-type]

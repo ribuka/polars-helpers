@@ -26,7 +26,7 @@ uv add "polars-helpers @ git+https://github.com/ribuka/polars-helpers.git"
 
 | Name | Description |
 |---|---|
-| `merge(left, right, columns=None, on=None, left_on=None, right_on=None, how="left", indicator="_merge", show_result=True)` | Join two frames of the same kind and add a pandas-style indicator column (`"both"`, `"left_only"`, `"right_only"`). `columns` limits the columns taken from `right`. With `show_result`, prints the shape change and the indicator counts. |
+| `merge(left, right, columns=None, on=None, left_on=None, right_on=None, how="left", indicator="_merge", verbose=False)` | Join two frames of the same kind like `pandas.merge`: the keys of both sides are coalesced into one set of key columns (named after the left keys), and an indicator column holds `"both"`, `"left_only"`, or `"right_only"` (`indicator=None` omits it). Keys are given as `on`, or as `left_on` and `right_on` (a name or a list). `columns` limits the columns taken from `right`; its keys are always taken. With `verbose`, prints the shape change and the indicator counts. |
 | `HOW` | `Literal["left", "right", "full", "inner"]`, the join strategies `merge` accepts. |
 
 ### Information

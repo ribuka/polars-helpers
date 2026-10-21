@@ -9,7 +9,7 @@ from .utils import natural_keys
 
 def get_value_counts(
     df: pl.DataFrame | pl.LazyFrame,
-    alias: str | bool,
+    alias: str,
     sort: bool = True,
 ) -> pl.DataFrame:
     """Count occurrences of each distinct value in one column.
@@ -18,10 +18,11 @@ def get_value_counts(
     ----------
     df : pl.DataFrame | pl.LazyFrame
         Frame containing the column to summarize.
-    alias : str | bool
+    alias : str
         Name of the column to count.
     sort : bool, default True
-        Whether to sort the result by descending count.
+        Whether to sort the result by descending count, breaking ties by
+        value so that the order is stable.
 
     Returns
     -------
@@ -40,7 +41,7 @@ def get_value_counts(
     else:
         raise TypeError("df must be a polars.DataFrame or polars.LazyFrame")
     if sort:
-        vc = vc.sort("count", descending=True)
+        vc = vc.sort(["count", alias], descending=[True, False])
     return vc
 
 
