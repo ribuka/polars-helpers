@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import re
+import threading
 from collections.abc import Sequence
 from itertools import islice
 from pathlib import Path
@@ -11,6 +12,8 @@ from pathlib import Path
 _NUMBER = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
 _MISSING_TOKENS = frozenset({"", "na", "n/a", "nan", "null", "none"})
 _MIN_DATA_ROWS = 2
+# csv.field_size_limit is process-wide; guards raising and restoring it.
+_FIELD_SIZE_LIMIT_LOCK = threading.Lock()
 
 
 def _is_blank(line: str) -> bool:
@@ -83,20 +86,22 @@ def _parse(
     list[list[str]] | None
         Records, where an empty line gives an empty record, or None when
         the lines cannot be parsed as CSV. Cells are not limited by
-        ``csv.field_size_limit``, which is restored afterwards.
+        ``csv.field_size_limit``, which is restored afterwards under a lock
+        shared by concurrent calls.
     """
     if quote_char is None:
         reader = csv.reader(lines, delimiter=separator, quoting=csv.QUOTE_NONE)
     else:
         reader = csv.reader(lines, delimiter=separator, quotechar=quote_char)
-    limit = csv.field_size_limit()
-    csv.field_size_limit(max(limit, sum(len(line) for line in lines)))
-    try:
-        return list(reader)
-    except csv.Error:
-        return None
-    finally:
-        csv.field_size_limit(limit)
+    with _FIELD_SIZE_LIMIT_LOCK:
+        limit = csv.field_size_limit()
+        csv.field_size_limit(max(limit, sum(len(line) for line in lines)))
+        try:
+            return list(reader)
+        except csv.Error:
+            return None
+        finally:
+            csv.field_size_limit(limit)
 
 
 def _forms_table(records: list[list[str]]) -> bool:

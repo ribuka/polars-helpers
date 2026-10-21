@@ -1,6 +1,7 @@
 """Tests for detecting the header line of a CSV preceded by metadata."""
 
 import csv
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import polars as pl
@@ -251,3 +252,15 @@ def test_read_csv_detects_with_encoding(tmp_path: Path) -> None:
 
     assert df.columns == ["a", "b"]
     assert df.height == 2
+
+
+def test_detect_csv_skip_lines_accepts_long_cells_concurrently(tmp_path: Path) -> None:
+    """Keep long cells accepted and the limit restored across threads."""
+    limit = csv.field_size_limit()
+    path = _write(tmp_path, f"name,value\n{'x' * (limit + 1)},1\ny,2\n")
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _: detect_csv_skip_lines(path), range(32)))
+
+    assert results == [0] * 32
+    assert csv.field_size_limit() == limit
