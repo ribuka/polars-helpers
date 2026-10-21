@@ -25,8 +25,9 @@
 ### Verification commands
 
 - Run lint: `uv run -m ruff check .`
+- Run type check: `uv run -m pyright` (checks `src`)
 - Run tests: `uv run -m pytest --tb=short -q`
-- CI runs both on every pull request to main, and the tests again with the lowest allowed polars.
+- CI runs all three on every pull request to main, and the tests again with the lowest allowed polars.
 
 ## Github
 
