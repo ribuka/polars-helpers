@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import polars as pl
 
 from .utils import natural_keys
@@ -154,20 +156,17 @@ def get_numeric_args(
     Returns
     -------
     list[str]
-        Names of the candidate columns with a numeric dtype.
+        Names of the candidate columns with a numeric dtype (integer,
+        unsigned integer, floating point, or decimal).
     """
-    if not args:
-        args = get_columns(df)
-    numeric_types = [pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64]
-    mapping = get_schema(df, args)
-    return [key for key, dtype in mapping.items() if dtype in numeric_types]
+    return [key for key, dtype in get_schema(df, args).items() if dtype.is_numeric()]
 
 
 def get_unique_values(
     df: pl.DataFrame | pl.LazyFrame,
     alias: str,
     sort: bool = True,
-) -> list[str]:
+) -> list[Any]:
     """Return one column's distinct non-null values.
 
     Parameters
@@ -177,26 +176,32 @@ def get_unique_values(
     alias : str
         Name of the column to read.
     sort : bool, default True
-        Whether to sort the values with ``natural_keys``, so that embedded
-        numbers order numerically rather than lexicographically.
+        Whether to sort the values. String columns are sorted with
+        ``natural_keys``, so that embedded numbers order numerically rather
+        than lexicographically; other columns are sorted by polars.
 
     Returns
     -------
-    list[str]
-        Distinct values of the column.
+    list[Any]
+        Distinct values of the column, as Python objects.
 
     Raises
     ------
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
-    if isinstance(df, pl.LazyFrame):
-        uniques = df.select(pl.col(alias).drop_nulls().unique()).collect().to_series().to_list()
-    elif isinstance(df, pl.DataFrame):
-        uniques = df.select(pl.col(alias).drop_nulls().unique()).to_series().to_list()
-    else:
+    if not isinstance(df, (pl.DataFrame, pl.LazyFrame)):
         raise TypeError("df must be a polars.DataFrame or polars.LazyFrame")
 
-    if sort:
-        return sorted(uniques, key=natural_keys)
-    return uniques
+    is_string = get_schema(df, [alias])[alias] == pl.String
+    expr = pl.col(alias).drop_nulls().unique()
+    if sort and not is_string:
+        expr = expr.sort()
+    uniques = df.select(expr)
+    if isinstance(uniques, pl.LazyFrame):
+        uniques = uniques.collect()
+    values = uniques.to_series().to_list()
+
+    if sort and is_string:
+        return sorted(values, key=natural_keys)
+    return values

@@ -36,8 +36,8 @@ uv add "polars-helpers @ git+https://github.com/ribuka/polars-helpers.git"
 | `get_shape(df)` | `(rows, columns)`. |
 | `get_columns(df)` | Column names. |
 | `get_schema(df, args=None)` | Schema, optionally limited to `args`. |
-| `get_numeric_args(df, args=None)` | Names of the numeric columns (among `args`). |
-| `get_unique_values(df, alias, sort=True)` | Distinct non-null values of one column, sorted naturally (`item-2` before `item-10`). |
+| `get_numeric_args(df, args=None)` | Names of the numeric (integer, unsigned integer, float, or decimal) columns (among `args`). |
+| `get_unique_values(df, alias, sort=True)` | Distinct non-null values of one column, sorted by value; String columns are sorted naturally (`item-2` before `item-10`). |
 | `get_value_counts(df, alias, sort=True)` | Count of each distinct value of one column. |
 
 ### Cleaning and output
@@ -46,8 +46,8 @@ uv add "polars-helpers @ git+https://github.com/ribuka/polars-helpers.git"
 |---|---|
 | `drop_all_null_columns(frame, include_nan_missing=True, threshold=0.99)` | Drop columns whose missing ratio (null, and NaN for float columns) is above `threshold`. |
 | `validate_missing_ratio_threshold(threshold)` | Raise `ValueError` unless `0.0 <= threshold <= 1.0`. |
-| `drop_list_type_columns(df)` | Drop List-typed columns and print their names. |
-| `safe_write_csv(df, file_path)` | Write a CSV after dropping List-typed columns. |
+| `drop_nested_type_columns(df)` | Drop nested-typed (List, Array, Struct) columns and print their names. |
+| `safe_write_csv(df, file_path)` | Write a CSV after dropping nested-typed columns. |
 
 ### `polars_helpers.utils`
 

@@ -8,30 +8,30 @@ import polars.selectors as cs
 from .info import get_schema
 
 
-def drop_list_type_columns(
+def drop_nested_type_columns(
     df: pl.DataFrame | pl.LazyFrame
 ) -> pl.DataFrame | pl.LazyFrame:
-    """Drop every List-typed column, which most writers cannot serialize.
+    """Drop every nested-typed column, which flat writers cannot serialize.
+
+    Nested dtypes are ``List``, ``Array``, and ``Struct``.
 
     Parameters
     ----------
     df : pl.DataFrame | pl.LazyFrame
-        Frame to inspect.
+        Frame to inspect. A ``LazyFrame`` is not materialized.
 
     Returns
     -------
     pl.DataFrame | pl.LazyFrame
-        ``df`` without its List-typed columns. The dropped names are printed
-        so notebook callers can see what was removed.
+        ``df`` without its nested-typed columns. The dropped names are
+        printed so notebook callers can see what was removed.
     """
-    drop_list = [
-        column
-        for column, dtype in get_schema(df).items()
-        if dtype == pl.datatypes.List
+    drop_cols = [
+        column for column, dtype in get_schema(df).items() if dtype.is_nested()
     ]
-    print(f"{drop_list = }")
+    print(f"{drop_cols = }")
 
-    return df.drop(drop_list)
+    return df.drop(drop_cols)
 
 
 def validate_missing_ratio_threshold(threshold: float) -> None:

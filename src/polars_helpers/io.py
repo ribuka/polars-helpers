@@ -6,7 +6,7 @@ from pathlib import Path
 
 import polars as pl
 
-from .cleaning import drop_list_type_columns
+from .cleaning import drop_nested_type_columns
 
 
 def safe_write_csv(
@@ -17,10 +17,11 @@ def safe_write_csv(
     Parameters
     ----------
     df : pl.DataFrame
-        Frame to write. List-typed columns are dropped first.
+        Frame to write. Nested-typed (List, Array, Struct) columns are
+        dropped first.
     file_path : str | Path
         Destination CSV path.
     """
-    df = drop_list_type_columns(df)  # ty:ignore[invalid-assignment]
+    df = drop_nested_type_columns(df)  # ty:ignore[invalid-assignment]
     df.write_csv(file_path)
     print(f"Written csv to {file_path}")
