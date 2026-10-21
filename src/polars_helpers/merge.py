@@ -71,14 +71,14 @@ def _resolve_keys(
     return _as_list(left_on), _as_list(right_on)
 
 
-def _join_with_indicator(
-    left: pl.DataFrame | pl.LazyFrame,
-    right: pl.DataFrame | pl.LazyFrame,
+def _join_with_indicator[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    left: FrameT,
+    right: FrameT,
     left_on: list[str],
     right_on: list[str],
     how: HOW,
     indicator: str | None,
-) -> pl.DataFrame | pl.LazyFrame:
+) -> FrameT:
     """Join two polars frames and optionally add a merge-origin indicator.
 
     Parameters
@@ -124,9 +124,9 @@ def _join_with_indicator(
     return out.drop(_IN_LEFT, _IN_RIGHT)
 
 
-def _print_summary(
-    left: pl.DataFrame | pl.LazyFrame,
-    out: pl.DataFrame | pl.LazyFrame,
+def _print_summary[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    left: FrameT,
+    out: FrameT,
     indicator: str | None,
 ) -> None:
     """Print the shape change of a merge and its merge-origin counts.
@@ -160,9 +160,9 @@ def _print_summary(
         print(out_stat)
 
 
-def merge(
-    left: pl.DataFrame | pl.LazyFrame,
-    right: pl.DataFrame | pl.LazyFrame,
+def merge[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    left: FrameT,
+    right: FrameT,
     columns: list[str] | None = None,
     on: str | list[str] | None = None,
     left_on: str | list[str] | None = None,
@@ -170,7 +170,7 @@ def merge(
     how: HOW = "left",
     indicator: str | None = "_merge",
     verbose: bool = False,
-) -> pl.DataFrame | pl.LazyFrame:
+) -> FrameT:
     """Merge two same-kind polars frames like ``pandas.merge``.
 
     The keys of both sides are coalesced into one set of key columns, named

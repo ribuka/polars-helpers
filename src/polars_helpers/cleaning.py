@@ -8,9 +8,9 @@ import polars.selectors as cs
 from .info import get_schema
 
 
-def drop_nested_type_columns(
-    df: pl.DataFrame | pl.LazyFrame
-) -> pl.DataFrame | pl.LazyFrame:
+def drop_nested_type_columns[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    df: FrameT, verbose: bool = False
+) -> FrameT:
     """Drop every nested-typed column, which flat writers cannot serialize.
 
     Nested dtypes are ``List``, ``Array``, and ``Struct``.
@@ -19,22 +19,25 @@ def drop_nested_type_columns(
     ----------
     df : pl.DataFrame | pl.LazyFrame
         Frame to inspect. A ``LazyFrame`` is not materialized.
+    verbose : bool, default False
+        Whether to print the names of the dropped columns, which is intended
+        for interactive notebook use.
 
     Returns
     -------
     pl.DataFrame | pl.LazyFrame
-        ``df`` without its nested-typed columns. The dropped names are
-        printed so notebook callers can see what was removed.
+        ``df`` without its nested-typed columns, of the same kind as ``df``.
     """
     drop_cols = [
         column for column, dtype in get_schema(df).items() if dtype.is_nested()
     ]
-    print(f"{drop_cols = }")
+    if verbose:
+        print(f"{drop_cols = }")
 
     return df.drop(drop_cols)
 
 
-def validate_missing_ratio_threshold(threshold: float) -> None:
+def _validate_missing_ratio_threshold(threshold: float) -> None:
     """Validate a missing-value ratio threshold.
 
     Parameters
@@ -51,8 +54,8 @@ def validate_missing_ratio_threshold(threshold: float) -> None:
         raise ValueError("threshold must be between 0.0 and 1.0")
 
 
-def _count_missing_values(
-    frame: pl.DataFrame | pl.LazyFrame,
+def _count_missing_values[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    df: FrameT,
     include_nan_missing: bool,
 ) -> tuple[int, dict[str, int]]:
     """Count the rows and each column's missing values in bulk.
@@ -67,7 +70,7 @@ def _count_missing_values(
 
     Parameters
     ----------
-    frame : pl.DataFrame | pl.LazyFrame
+    df : pl.DataFrame | pl.LazyFrame
         Frame whose columns are evaluated. A ``pl.LazyFrame`` collects only
         the statistics queries.
     include_nan_missing : bool
@@ -78,10 +81,10 @@ def _count_missing_values(
     tuple[int, dict[str, int]]
         Row count and missing-value count per column, in column order.
     """
-    queries = [frame.select(pl.len()), frame.null_count()]
+    queries = [df.select(pl.len()), df.null_count()]
     if include_nan_missing:
-        queries.append(frame.select(cs.float().is_nan().sum()))
-    stats = pl.collect_all(queries) if isinstance(frame, pl.LazyFrame) else queries
+        queries.append(df.select(cs.float().is_nan().sum()))
+    stats = pl.collect_all(queries) if isinstance(df, pl.LazyFrame) else queries
 
     row_count = stats[0].item()
     missing_counts: dict[str, int] = {}
@@ -91,16 +94,16 @@ def _count_missing_values(
     return row_count, missing_counts
 
 
-def drop_all_null_columns(
-    frame: pl.DataFrame | pl.LazyFrame,
+def drop_all_null_columns[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    df: FrameT,
     include_nan_missing: bool = True,
     threshold: float = 0.99,
-) -> pl.DataFrame | pl.LazyFrame:
+) -> FrameT:
     """Drop columns whose missing-value ratio exceeds a threshold.
 
     Parameters
     ----------
-    frame : pl.DataFrame | pl.LazyFrame
+    df : pl.DataFrame | pl.LazyFrame
         Frame whose columns are evaluated for missing values.
     include_nan_missing : bool, default True
         Whether NaN values count as missing for floating-point columns.
@@ -110,18 +113,19 @@ def drop_all_null_columns(
     Returns
     -------
     pl.DataFrame | pl.LazyFrame
-        ``frame`` restricted to columns at or below ``threshold``.
+        ``df`` restricted to columns at or below ``threshold``, of the same
+        kind as ``df``.
 
     Raises
     ------
     ValueError
         If ``threshold`` is not between 0.0 and 1.0.
     """
-    validate_missing_ratio_threshold(threshold)
+    _validate_missing_ratio_threshold(threshold)
 
-    row_count, missing_counts = _count_missing_values(frame, include_nan_missing)
+    row_count, missing_counts = _count_missing_values(df, include_nan_missing)
     if row_count == 0:
-        return frame
+        return df
 
     keep_cols = [
         col_name
@@ -129,6 +133,6 @@ def drop_all_null_columns(
         if missing_count / row_count <= threshold
     ]
     if len(keep_cols) == len(missing_counts):
-        return frame
+        return df
 
-    return frame.select(keep_cols)
+    return df.select(keep_cols)
