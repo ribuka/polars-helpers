@@ -192,6 +192,11 @@ def test_detect_csv_skip_lines_finds_header(
             id="quoted-line-break-inside-data",
         ),
         pytest.param(
+            'Name,Value\n"multi\nline",1\na,2\nb,3\nc,4\n',
+            "spans lines",
+            id="quoted-line-break-in-first-column",
+        ),
+        pytest.param(
             "Key,Value\nk1,v1\n\nName,City\nalice,tokyo\nbob,osaka\n",
             "fit the data",
             id="all-text-same-width-metadata-before-empty-line",

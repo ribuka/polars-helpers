@@ -118,7 +118,7 @@ def _is_header_like(fields: list[str], types: list[_Kind | None]) -> bool:
 
 def _read_sample(
     source: str | Path, separator: str, encoding: str, sample_lines: int
-) -> list[list[str]]:
+) -> tuple[list[str], list[list[str]]]:
     """Parse the first physical lines of a file one line at a time.
 
     Each line is parsed on its own so that an unclosed ``"`` in the metadata
@@ -137,16 +137,16 @@ def _read_sample(
 
     Returns
     -------
-    list[list[str]]
-        Cells of each line, with trailing empty lines removed. An empty line
-        has no cells.
+    tuple[list[str], list[list[str]]]
+        Text and cells of each line, with trailing empty lines removed. An
+        empty line has no cells.
     """
     with Path(source).open(encoding=encoding, newline="\n") as file:
         lines = [line.rstrip("\r\n") for line in islice(file, sample_lines)]
     rows = [next(csv.reader([line], delimiter=separator), []) for line in lines]
     while rows and not rows[-1]:
         rows.pop()
-    return rows
+    return lines[: len(rows)], rows
 
 
 def _describe(rows: list[list[str]], start: int, stop: int) -> str:
@@ -228,11 +228,12 @@ def detect_csv_skip_lines(
         share one field count); the header looks like two lines (for example
         names and units); or lines of the table width that fit the data types
         sit above the detected header, even before an empty line or a
-        field-count change. The message shows the
+        field-count change; or a quoted cell spans lines at or after the
+        header (a line there has an odd number of ``"``). The message shows the
         width and the candidate lines so that ``skip_lines`` can be given by
         hand instead.
     """
-    rows = _read_sample(source, separator, encoding, sample_lines)
+    lines, rows = _read_sample(source, separator, encoding, sample_lines)
     if not rows:
         raise ValueError(f"{source} has no lines to detect a CSV header from.")
 
@@ -289,8 +290,19 @@ def detect_csv_skip_lines(
             + _describe(rows, start - 1, header + 2)
         )
 
+    # An odd number of quotes opens or closes a quoted line break, so the
+    # line is only part of a record (for example a header that is really the
+    # rest of a first data cell).
+    split = [n for n in range(header, end) if lines[n].count('"') % 2]
+    if split:
+        raise ValueError(
+            f"A quoted cell of {source} spans lines at or after the header "
+            f"candidate (width {width}):\n"
+            + "\n".join(_describe(rows, n - 1, n + 1) for n in split[:3])
+        )
+
     if header > start:
-        above = [_is_header_like(rows[n], types) for n in range(start, header)]
+        above =[_is_header_like(rows[n], types) for n in range(start, header)]
         if not all(above):
             raise ValueError(
                 f"Lines that fit the data sit above the header candidate of "
