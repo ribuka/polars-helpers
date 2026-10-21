@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import polars as pl
+import polars.selectors as cs
 
 from .utils import natural_keys
 
@@ -86,9 +87,9 @@ def get_value_counts(
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
-    vc = _collect(df, alias).to_series().value_counts()
+    vc = _collect(df, cs.by_name(alias)).to_series().value_counts()
     if sort:
-        vc = vc.sort(["count", alias], descending=[True, False])
+        vc = vc.sort([pl.col("count"), cs.by_name(alias)], descending=[True, False])
     return vc
 
 
@@ -222,7 +223,7 @@ def get_unique_values(
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
     is_string = get_schema(df, [alias])[alias] == pl.String
-    expr = pl.col(alias).drop_nulls().unique()
+    expr = cs.by_name(alias).drop_nulls().unique()
     if sort and not is_string:
         expr = expr.sort()
     values = _collect(df, expr).to_series().to_list()
