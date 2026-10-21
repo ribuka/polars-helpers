@@ -15,6 +15,18 @@ HOW = Literal["left", "right", "full", "inner"]
 _IN_LEFT = "__polars_helpers_in_left"
 _IN_RIGHT = "__polars_helpers_in_right"
 
+# Row order of each join strategy, as with pandas.merge: the rows follow the
+# left frame (the right frame for how="right"), and the rows sharing one row
+# of that frame follow the other frame. pandas sorts the keys of an outer
+# join; a full join here keeps the left order and appends the right-only rows
+# in the right order instead.
+_MAINTAIN_ORDER: dict[HOW, Literal["left_right", "right_left"]] = {
+    "left": "left_right",
+    "right": "right_left",
+    "full": "left_right",
+    "inner": "left_right",
+}
+
 
 def _as_list(keys: str | list[str] | None) -> list[str]:
     """Normalize a key specification to a list of column names.
@@ -97,11 +109,17 @@ def _join_with_indicator[FrameT: (pl.DataFrame, pl.LazyFrame)](
     -------
     pl.DataFrame | pl.LazyFrame
         Joined frame, of the same kind as the inputs, with the keys of both
-        sides coalesced into the left key columns.
+        sides coalesced into the left key columns, in the row order of
+        ``_MAINTAIN_ORDER``.
     """
     if indicator is None:
         return left.join(
-            right, left_on=left_on, right_on=right_on, how=how, coalesce=True
+            right,
+            left_on=left_on,
+            right_on=right_on,
+            how=how,
+            coalesce=True,
+            maintain_order=_MAINTAIN_ORDER[how],
         )
 
     out = left.with_columns(pl.lit(True).alias(_IN_LEFT)).join(
@@ -110,6 +128,7 @@ def _join_with_indicator[FrameT: (pl.DataFrame, pl.LazyFrame)](
         right_on=right_on,
         how=how,
         coalesce=True,
+        maintain_order=_MAINTAIN_ORDER[how],
     )
 
     in_left = pl.col(_IN_LEFT).fill_null(False)
@@ -176,6 +195,13 @@ def merge[FrameT: (pl.DataFrame, pl.LazyFrame)](
     The keys of both sides are coalesced into one set of key columns, named
     after the left keys, and a merge-origin column is added as with
     ``pandas.merge(..., indicator=True)``.
+
+    The row order is kept as with ``pandas.merge``, for ``pl.DataFrame`` and
+    ``pl.LazyFrame`` alike: ``"left"`` and ``"inner"`` follow the left rows,
+    ``"right"`` follows the right rows, and the rows sharing one row of that
+    side follow the other side. ``"full"`` follows the left rows and then
+    the right-only rows in the right order, instead of sorting the keys as
+    pandas does.
 
     Parameters
     ----------

@@ -14,7 +14,7 @@ n_rows, n_cols = plh.get_shape(lazy_frame)  # does not collect the frame
   `pl.DataFrame`), and returns the same kind it was given; the type hints say
   so too.
 - Nothing is printed unless `verbose=True` is passed.
-- The package depends only on polars (1.1 or later).
+- The package depends only on polars (1.18 or later).
 
 ## Install
 
@@ -28,7 +28,7 @@ uv add "polars-helpers @ git+https://github.com/ribuka/polars-helpers.git"
 
 | Name | Description |
 |---|---|
-| `merge(left, right, columns=None, on=None, left_on=None, right_on=None, how="left", indicator="_merge", verbose=False)` | Join two frames of the same kind like `pandas.merge`: the keys of both sides are coalesced into one set of key columns (named after the left keys), and an indicator column holds `"both"`, `"left_only"`, or `"right_only"` (`indicator=None` omits it). Keys are given as `on`, or as `left_on` and `right_on` (a name or a list). `columns` limits the columns taken from `right`; its keys are always taken. With `verbose`, prints the shape change and the indicator counts. |
+| `merge(left, right, columns=None, on=None, left_on=None, right_on=None, how="left", indicator="_merge", verbose=False)` | Join two frames of the same kind like `pandas.merge`: the keys of both sides are coalesced into one set of key columns (named after the left keys), and an indicator column holds `"both"`, `"left_only"`, or `"right_only"` (`indicator=None` omits it). Keys are given as `on`, or as `left_on` and `right_on` (a name or a list). `columns` limits the columns taken from `right`; its keys are always taken. The row order is kept as with `pandas.merge`, for `pl.LazyFrame` too: `"left"` and `"inner"` follow the left rows, `"right"` follows the right rows, and the rows sharing one row of that side follow the other side; `"full"` follows the left rows and then the right-only rows (pandas sorts the keys instead). With `verbose`, prints the shape change and the indicator counts. |
 | `HOW` | `Literal["left", "right", "full", "inner"]`, the join strategies `merge` accepts. |
 
 ### Information

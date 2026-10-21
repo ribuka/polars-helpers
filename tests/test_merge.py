@@ -80,6 +80,45 @@ def test_merge_keeps_lazy_frames_lazy(left: pl.DataFrame, right: pl.DataFrame) -
     assert lazy.collect().equals(eager)
 
 
+@pytest.mark.parametrize(
+    ("how", "expected"),
+    [
+        ("left", [("a", 30), ("b", 10), ("b", 11), ("c", 20), ("d", 10), ("d", 11), ("e", None)]),
+        ("inner", [("a", 30), ("b", 10), ("b", 11), ("c", 20), ("d", 10), ("d", 11)]),
+        (
+            "right",
+            [(None, 40), ("b", 10), ("d", 10), ("c", 20), ("b", 11), ("d", 11), (None, 60), ("a", 30)],
+        ),
+        (
+            "full",
+            [
+                ("a", 30), ("b", 10), ("b", 11), ("c", 20), ("d", 10), ("d", 11), ("e", None),
+                (None, 40), (None, 60),
+            ],
+        ),
+    ],
+)
+@pytest.mark.parametrize("lazy", [False, True])
+@pytest.mark.parametrize("indicator", ["_merge", None])
+def test_merge_keeps_row_order_like_pandas(
+    how: plh.HOW,
+    expected: list[tuple[str | None, int | None]],
+    lazy: bool,
+    indicator: str | None,
+) -> None:
+    """Keep the row order of ``pandas.merge`` for eager and lazy frames."""
+    left = pl.DataFrame({"k": [3, 1, 2, 1, 5], "a": ["a", "b", "c", "d", "e"]})
+    right = pl.DataFrame({"k": [4, 1, 2, 1, 6, 3], "b": [40, 10, 20, 11, 60, 30]})
+
+    if lazy:
+        result = plh.merge(left.lazy(), right.lazy(), on="k", how=how, indicator=indicator)
+        result = result.collect()
+    else:
+        result = plh.merge(left, right, on="k", how=how, indicator=indicator)
+
+    assert list(result.select("a", "b").iter_rows()) == expected
+
+
 @pytest.mark.parametrize("columns", [["k", "b"], ["b"]])
 def test_merge_takes_selected_columns_and_the_keys(
     left: pl.DataFrame,

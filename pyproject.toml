@@ -9,9 +9,10 @@ description = "Small helpers for polars DataFrames and LazyFrames."
 readme = "README.md"
 requires-python = ">=3.13"
 # The lower bound is the oldest polars the CI `test-lowest` job tests;
-# 1.1 is the first release whose join accepts how="right".
+# 1.18 is the first release whose join keeps the right order with
+# maintain_order (1.17 added the parameter but ignores it for how="right").
 dependencies = [
-    "polars>=1.1",
+    "polars>=1.18",
 ]
 
 [dependency-groups]
