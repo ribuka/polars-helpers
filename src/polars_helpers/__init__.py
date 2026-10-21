@@ -15,7 +15,7 @@ from .info import (
     get_unique_values,
     get_value_counts,
 )
-from .io import safe_write_csv
+from .io import read_csv, safe_write_csv, scan_csv
 from .merge import HOW, merge
 
 __all__ = [
@@ -29,5 +29,7 @@ __all__ = [
     "get_unique_values",
     "get_value_counts",
     "merge",
+    "read_csv",
     "safe_write_csv",
+    "scan_csv",
 ]

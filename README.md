@@ -42,6 +42,13 @@ uv add "polars-helpers @ git+https://github.com/ribuka/polars-helpers.git"
 | `get_unique_values(df, column, sort=True)` | Distinct non-null values of one column, sorted by value; String columns are sorted naturally (`item-2` before `item-10`). |
 | `get_value_counts(df, column, sort=True)` | Count of each distinct value of one column. |
 
+### CSV input
+
+| Name | Description |
+|---|---|
+| `read_csv(source, *, separator=",", encoding="utf-8-sig", **kwargs)` | Read a CSV file whose table may follow metadata lines (equipment info, conditions, ...): the header line is found with `detect_csv_skip_lines` and passed to `pl.read_csv` as `skip_lines`, with `**kwargs`. `encoding` is used only for the detection (polars reads UTF-8 only). `skip_lines`, `skip_rows`, or `has_header=False` raise `TypeError`; use `pl.read_csv` to give them by hand. |
+| `scan_csv(source, *, separator=",", encoding="utf-8-sig", **kwargs)` | The same for `pl.scan_csv`, returning a `pl.LazyFrame`; only the first lines are read for the detection. |
+
 ### Cleaning and output
 
 | Name | Description |
@@ -56,6 +63,7 @@ Helpers that do not depend on polars. They are not exported from the top level.
 
 | Name | Description |
 |---|---|
+| `detect_csv_skip_lines(source, *, separator=",", encoding="utf-8-sig", sample_lines=200)` | Number of physical lines before the header line of a CSV file that may start with metadata, to pass as `skip_lines=` (not `skip_rows=`). Only the first `sample_lines` lines are read: the field count of the last line is the table width, and the header is the lowest line of that width whose cells contradict the number or date/time columns below it (or the top of that run of lines if there is no such cue). Raises `ValueError`, showing the width and the candidate lines, instead of guessing: for an empty file, fewer than 2 columns, fewer than 2 data lines, a two-line header (names and units), or data-like lines above the header. Metadata with the table's field count and no empty line before the header is told apart only by type cues, so with all-text columns its first line is taken as the header. |
 | `natural_keys(text)` | Sort key that orders embedded numbers numerically: `sorted(values, key=natural_keys)`. |
 
 ## Development
