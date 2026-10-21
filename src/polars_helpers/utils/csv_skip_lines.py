@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import csv
 import re
-from collections.abc import Iterator
 from datetime import datetime, time
 from enum import Enum
 from itertools import islice
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import _csv
 
 # Fewest data lines that must follow the detected header.
 _MIN_DATA_LINES = 2
@@ -123,7 +126,7 @@ def _read_sample(
     quote_char: str | None,
     encoding: str,
     sample_lines: int,
-) -> tuple[list[list[str]], list[bool]]:
+) -> tuple[list[list[str]], list[int]]:
     """Parse the first physical lines of a file one line at a time.
 
     Each line is parsed on its own so that an unclosed quote in the metadata
@@ -144,25 +147,36 @@ def _read_sample(
 
     Returns
     -------
-    tuple[list[list[str]], list[bool]]
+    tuple[list[list[str]], list[int]]
         Cells of each line, with trailing empty lines removed (an empty line
-        has no cells), and whether each line leaves a quoted cell open, so
-        that its record goes on in the next line.
+        has no cells), and the index of the last physical line of the record
+        that starts at each line (the line itself unless a quoted cell is
+        left open; an open quote that never closes within the sample goes on
+        to the next line only).
     """
     with Path(source).open(encoding=encoding, newline="\n") as file:
         lines = [line.rstrip("\r\n") for line in islice(file, sample_lines)]
 
-    def reader(text: list[str]) -> Iterator[list[str]]:
+    def reader(text: list[str]) -> _csv.Reader:
         if quote_char is None:
             return csv.reader(text, delimiter=separator, quoting=csv.QUOTE_NONE)
         return csv.reader(text, delimiter=separator, quotechar=quote_char)
 
     rows = [next(reader([line]), []) for line in lines]
-    # A line that leaves a quoted cell open is merged with the next line.
-    opens = [len(list(reader([line + "\n", "x\n"]))) == 1 for line in lines]
+    # A line that leaves a quoted cell open is merged with the following
+    # lines up to the one that closes it.
+    reach = list(range(len(lines)))
+    for number, line in enumerate(lines):
+        if len(list(reader([line + "\n", "x\n"]))) != 1:
+            continue
+        record = reader([text + "\n" for text in lines[number:]])
+        next(record)
+        last = number + record.line_num - 1
+        # An open quote that never closes goes on to the next line only.
+        reach[number] = last if last < len(lines) - 1 else number + 1
     while rows and not rows[-1]:
         rows.pop()
-    return rows, opens[: len(rows)]
+    return rows, reach[: len(rows)]
 
 
 def _describe(rows: list[list[str]], start: int, stop: int) -> str:
@@ -252,7 +266,7 @@ def detect_csv_skip_lines(
         header. The message shows the width and the candidate lines so that ``skip_lines`` can be given by
         hand instead.
     """
-    rows, opens = _read_sample(
+    rows, reach = _read_sample(
         source, separator, quote_char, encoding, sample_lines
     )
     if not rows:
@@ -313,7 +327,7 @@ def detect_csv_skip_lines(
 
     # A quoted line break makes a line only part of a record (for example a
     # header that is really the rest of a first data cell).
-    split = [n for n in range(max(header - 1, 0), end) if opens[n]]
+    split = [n for n in range(end) if reach[n] > n and reach[n] >= header]
     if split:
         raise ValueError(
             f"A quoted cell of {source} spans lines into or after the header "
@@ -322,7 +336,7 @@ def detect_csv_skip_lines(
         )
 
     if header > start:
-        above =[_is_header_like(rows[n], types) for n in range(start, header)]
+        above = [_is_header_like(rows[n], types) for n in range(start, header)]
         if not all(above):
             raise ValueError(
                 f"Lines that fit the data sit above the header candidate of "

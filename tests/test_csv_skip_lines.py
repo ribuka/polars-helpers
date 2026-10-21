@@ -197,6 +197,11 @@ def test_detect_csv_skip_lines_finds_header(
             id="quoted-line-break-in-first-column",
         ),
         pytest.param(
+            'Name,Value\n"multi\nmiddle\nline",1\na,2\nb,3\nc,4\n',
+            "spans lines",
+            id="quoted-cell-over-three-lines",
+        ),
+        pytest.param(
             "Key,Value\nk1,v1\n\nName,City\nalice,tokyo\nbob,osaka\n",
             "fit the data",
             id="all-text-same-width-metadata-before-empty-line",
@@ -272,6 +277,17 @@ def test_detect_csv_skip_lines_reads_quotes_as_text_without_quote_char(
     assert detect_csv_skip_lines(path, quote_char=None) == 0
     with pytest.raises(ValueError, match="spans lines"):
         detect_csv_skip_lines(path)
+
+
+@pytest.mark.parametrize("reader", [plh.read_csv, plh.scan_csv])
+def test_csv_readers_reject_quoted_cell_over_three_lines(
+    tmp_path: Path, reader: object
+) -> None:
+    """Reject a quoted cell that opens two lines before the header candidate."""
+    path = _write(tmp_path, 'Name,Value\n"multi\nmiddle\nline",1\na,2\nb,3\nc,4\n')
+
+    with pytest.raises(ValueError, match="spans lines"):
+        reader(path)  # type: ignore[operator]
 
 
 @pytest.mark.parametrize("reader", [plh.read_csv, plh.scan_csv])
