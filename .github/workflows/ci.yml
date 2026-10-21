@@ -77,11 +77,15 @@ jobs:
       - name: Test
         run: uv run -m pytest
 
-  # Tests the lowest polars that pyproject.toml allows, so a helper that
-  # starts using a newer polars API fails here instead of in an application.
+  # Tests the lowest Python and polars that pyproject.toml allows, so code
+  # that starts using a newer Python or polars API fails here instead of in
+  # an application.
   test-lowest:
-    name: Test (lowest polars)
+    name: Test (lowest Python and polars)
     runs-on: ubuntu-latest
+    env:
+      # Overrides .python-version, which pins the other jobs to 3.13.
+      UV_PYTHON: "3.12"
 
     steps:
       - uses: actions/checkout@v6
@@ -91,7 +95,7 @@ jobs:
           enable-cache: true
 
       - name: Set up Python
-        run: uv python install 3.13
+        run: uv python install 3.12
 
       - name: Install dependencies
         run: uv sync --resolution lowest-direct
