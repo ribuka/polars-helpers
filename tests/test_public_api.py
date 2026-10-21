@@ -8,7 +8,7 @@ def test_public_api_exports_every_name() -> None:
     assert sorted(plh.__all__) == [
         "HOW",
         "drop_all_null_columns",
-        "drop_list_type_columns",
+        "drop_nested_type_columns",
         "get_columns",
         "get_numeric_args",
         "get_schema",

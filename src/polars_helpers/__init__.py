@@ -5,7 +5,7 @@ Use it as ``import polars_helpers as plh``.
 
 from .cleaning import (
     drop_all_null_columns,
-    drop_list_type_columns,
+    drop_nested_type_columns,
     validate_missing_ratio_threshold,
 )
 from .info import (
@@ -22,7 +22,7 @@ from .merge import HOW, merge
 __all__ = [
     "HOW",
     "drop_all_null_columns",
-    "drop_list_type_columns",
+    "drop_nested_type_columns",
     "get_columns",
     "get_numeric_args",
     "get_schema",
