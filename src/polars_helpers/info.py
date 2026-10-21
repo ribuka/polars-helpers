@@ -9,6 +9,56 @@ import polars as pl
 from .utils import natural_keys
 
 
+def _require_frame(df: object) -> None:
+    """Reject inputs that are not polars frames.
+
+    Parameters
+    ----------
+    df : object
+        Value expected to be a ``pl.DataFrame`` or ``pl.LazyFrame``.
+
+    Raises
+    ------
+    TypeError
+        If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
+    """
+    if not isinstance(df, (pl.DataFrame, pl.LazyFrame)):
+        raise TypeError("df must be a polars.DataFrame or polars.LazyFrame")
+
+
+def _collect(
+    df: pl.DataFrame | pl.LazyFrame,
+    *exprs: str | pl.Expr,
+) -> pl.DataFrame:
+    """Select expressions from a frame and return them as a DataFrame.
+
+    Only the selected expressions are evaluated, so a ``LazyFrame`` is never
+    materialized in full.
+
+    Parameters
+    ----------
+    df : pl.DataFrame | pl.LazyFrame
+        Frame to select from.
+    *exprs : str | pl.Expr
+        Column names or expressions to select.
+
+    Returns
+    -------
+    pl.DataFrame
+        The selected columns, collected if ``df`` is a ``LazyFrame``.
+
+    Raises
+    ------
+    TypeError
+        If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
+    """
+    _require_frame(df)
+    selected = df.select(*exprs)
+    if isinstance(selected, pl.LazyFrame):
+        return selected.collect()
+    return selected
+
+
 def get_value_counts(
     df: pl.DataFrame | pl.LazyFrame,
     alias: str,
@@ -36,12 +86,7 @@ def get_value_counts(
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
-    if isinstance(df, pl.LazyFrame):
-        vc = df.select(alias).collect()[alias].value_counts()  # ty:ignore[not-subscriptable, unresolved-attribute]
-    elif isinstance(df, pl.DataFrame):
-        vc = df[alias].value_counts()  # ty:ignore[unresolved-attribute]
-    else:
-        raise TypeError("df must be a polars.DataFrame or polars.LazyFrame")
+    vc = _collect(df, alias).to_series().value_counts()
     if sort:
         vc = vc.sort(["count", alias], descending=[True, False])
     return vc
@@ -71,14 +116,7 @@ def get_shape(
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
-    if isinstance(df, pl.DataFrame):
-        return df.shape
-    elif isinstance(df, pl.LazyFrame):
-        n_rows = df.select(pl.len().alias("n_rows")).collect()["n_rows"][0]  # ty:ignore[not-subscriptable]
-        n_cols = len(df.collect_schema())
-        return (n_rows, n_cols)
-    else:
-        raise TypeError("df must be a polars.DataFrame or polars.LazyFrame")
+    return (_collect(df, pl.len()).item(), len(get_schema(df)))
 
 
 def get_columns(df: pl.DataFrame | pl.LazyFrame) -> list[str]:
@@ -99,11 +137,7 @@ def get_columns(df: pl.DataFrame | pl.LazyFrame) -> list[str]:
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
-    if isinstance(df, pl.DataFrame):
-        return df.columns
-    if isinstance(df, pl.LazyFrame):
-        return df.collect_schema().names()
-    raise TypeError("df must be a polars.DataFrame or polars.LazyFrame")
+    return get_schema(df).names()
 
 
 def get_schema(
@@ -130,13 +164,10 @@ def get_schema(
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
+    _require_frame(df)
     if args:
         df = df.select(args)
-    if isinstance(df, pl.LazyFrame):
-        return df.collect_schema()
-    if isinstance(df, pl.DataFrame):
-        return df.schema
-    raise TypeError("df must be a polars.DataFrame or polars.LazyFrame")
+    return df.collect_schema()
 
 
 def get_numeric_args(
@@ -190,17 +221,11 @@ def get_unique_values(
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
-    if not isinstance(df, (pl.DataFrame, pl.LazyFrame)):
-        raise TypeError("df must be a polars.DataFrame or polars.LazyFrame")
-
     is_string = get_schema(df, [alias])[alias] == pl.String
     expr = pl.col(alias).drop_nulls().unique()
     if sort and not is_string:
         expr = expr.sort()
-    uniques = df.select(expr)
-    if isinstance(uniques, pl.LazyFrame):
-        uniques = uniques.collect()
-    values = uniques.to_series().to_list()
+    values = _collect(df, expr).to_series().to_list()
 
     if sort and is_string:
         return sorted(values, key=natural_keys)

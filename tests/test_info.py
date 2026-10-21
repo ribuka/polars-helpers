@@ -66,6 +66,19 @@ def test_info_helpers_reject_non_frames(helper: Callable[..., object]) -> None:
         helper({"a": [1]})
 
 
+@pytest.mark.parametrize(
+    "helper",
+    [
+        lambda df: plh.get_value_counts(df, "a"),
+        lambda df: plh.get_schema(df, ["a"]),
+    ],
+)
+def test_column_helpers_reject_non_frames(helper: Callable[..., object]) -> None:
+    """Raise ``TypeError`` before selecting columns from a non-frame input."""
+    with pytest.raises(TypeError, match="must be a polars"):
+        helper({"a": [1]})
+
+
 def test_get_numeric_args_includes_every_numeric_dtype(
     mixed_dtype_frame: pl.DataFrame,
 ) -> None:

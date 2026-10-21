@@ -78,22 +78,16 @@ def _count_missing_values(
     tuple[int, dict[str, int]]
         Row count and missing-value count per column, in column order.
     """
-    nan_count_expr = cs.float().is_nan().sum()
-    if isinstance(frame, pl.LazyFrame):
-        queries = [frame.select(pl.len()), frame.null_count()]
-        if include_nan_missing:
-            queries.append(frame.select(nan_count_expr))
-        stats = pl.collect_all(queries)
-    else:
-        stats = [frame.select(pl.len()), frame.null_count()]
-        if include_nan_missing:
-            stats.append(frame.select(nan_count_expr))
+    queries = [frame.select(pl.len()), frame.null_count()]
+    if include_nan_missing:
+        queries.append(frame.select(cs.float().is_nan().sum()))
+    stats = pl.collect_all(queries) if isinstance(frame, pl.LazyFrame) else queries
+
     row_count = stats[0].item()
-    missing_counts, *nan_counts = [
-        stat.row(0, named=True) if stat.width else {} for stat in stats[1:]
-    ]
-    for col_name, nan_count in (nan_counts[0] if nan_counts else {}).items():
-        missing_counts[col_name] += nan_count
+    missing_counts: dict[str, int] = {}
+    for stat in stats[1:]:
+        for col_name, count in (stat.row(0, named=True) if stat.width else {}).items():
+            missing_counts[col_name] = missing_counts.get(col_name, 0) + count
     return row_count, missing_counts
 
 

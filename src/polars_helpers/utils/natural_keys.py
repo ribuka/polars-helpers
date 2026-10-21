@@ -4,6 +4,24 @@ from __future__ import annotations
 
 import re
 
+_DIGIT_RUNS = re.compile(r"(\d+)")
+
+
+def _atoi(fragment: str) -> int | str:
+    """Convert one split fragment to ``int`` when it is all digits.
+
+    Parameters
+    ----------
+    fragment : str
+        Fragment produced by splitting on digit runs.
+
+    Returns
+    -------
+    int | str
+        The fragment as an ``int`` if numeric, otherwise unchanged.
+    """
+    return int(fragment) if fragment.isdigit() else fragment
+
 
 def natural_keys(text: int | str | bool) -> list[int | str]:
     """Build a sort key that orders embedded numbers numerically.
@@ -29,19 +47,4 @@ def natural_keys(text: int | str | bool) -> list[int | str]:
     if isinstance(text, int):
         return [text]
 
-    def atoi(fragment: str) -> int | str:
-        """Convert one split fragment to ``int`` when it is all digits.
-
-        Parameters
-        ----------
-        fragment : str
-            Fragment produced by splitting on digit runs.
-
-        Returns
-        -------
-        int | str
-            The fragment as an ``int`` if numeric, otherwise unchanged.
-        """
-        return int(fragment) if fragment.isdigit() else fragment
-
-    return [atoi(fragment) for fragment in re.split(r"(\d+)", str(text))]
+    return [_atoi(fragment) for fragment in _DIGIT_RUNS.split(str(text))]
