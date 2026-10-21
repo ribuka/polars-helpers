@@ -42,6 +42,13 @@ uv add "polars-helpers @ git+https://github.com/ribuka/polars-helpers.git"
 | `get_unique_values(df, column, sort=True)` | Distinct non-null values of one column, sorted by value; String columns are sorted naturally (`item-2` before `item-10`). |
 | `get_value_counts(df, column, sort=True)` | Count of each distinct value of one column. |
 
+### Input
+
+| Name | Description |
+|---|---|
+| `read_csv(source, **kwargs)` | `pl.read_csv(source, **kwargs)` with `skip_lines` detected by `detect_csv_skip_lines`, so that metadata lines above the header are skipped. `source` is a path; the `separator`, `quote_char`, and `encoding` of `kwargs` are also used for the detection. Nothing is detected when `skip_lines` or `skip_rows` is given or `has_header=False`. Raises `ValueError` when the header cannot be detected with confidence. |
+| `scan_csv(source, **kwargs)` | The same for `pl.scan_csv`, returning a `pl.LazyFrame`; only the first lines are read for the detection. |
+
 ### Cleaning and output
 
 | Name | Description |
@@ -56,6 +63,7 @@ Helpers that do not depend on polars. They are not exported from the top level.
 
 | Name | Description |
 |---|---|
+| `detect_csv_skip_lines(source, *, separator=",", quote_char='"', encoding="utf-8-sig", sample_lines=200)` | Number of physical lines before the header of a CSV that starts with metadata, for `skip_lines=`. The first non-empty line from which the rest of the first `sample_lines` lines reads as a table is taken: the same number (two or more) of cells in every record, no empty line, at least two data rows, every column either all numeric or free of numbers (ignoring missing tokens such as `NA`), and the header not numeric in at least one numeric column. Raises `ValueError` for an empty file, when no line qualifies, and when the line just above the header is not empty and has as many cells (metadata of the same width must be followed by an empty line; a two-line header is not supported). An all-text table preceded by same-width metadata without an empty line is read with that metadata as its header. |
 | `natural_keys(text)` | Sort key that orders embedded numbers numerically: `sorted(values, key=natural_keys)`. |
 
 ## Development
