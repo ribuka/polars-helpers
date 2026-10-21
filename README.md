@@ -27,7 +27,7 @@ See the docstrings for arguments and details.
 
 | Name | Description |
 |---|---|
-| `merge` | Join two frames like `pandas.merge`, with coalesced keys, an indicator column, and the same row order. |
+| `merge` | Join two frames like `pandas.merge`, with coalesced keys, an indicator column, and a deterministic row order (pandas-compatible except for `how="full"`). |
 | `HOW` | The join strategies `merge` accepts. |
 | `get_shape` | `(rows, columns)`. |
 | `get_columns` | Column names. |
