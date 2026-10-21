@@ -60,12 +60,43 @@ def _collect(
     return selected
 
 
+def _value_counts_query(
+    df: pl.DataFrame | pl.LazyFrame,
+    alias: str,
+    sort: bool = True,
+) -> pl.DataFrame | pl.LazyFrame:
+    """Build the per-value counts of one column without collecting it.
+
+    Parameters
+    ----------
+    df : pl.DataFrame | pl.LazyFrame
+        Frame containing the column to summarize.
+    alias : str
+        Name of the column to count.
+    sort : bool, default True
+        Whether to sort by descending count, breaking ties by value.
+
+    Returns
+    -------
+    pl.DataFrame | pl.LazyFrame
+        Distinct values with their ``count``, of the same kind as ``df``; a
+        ``LazyFrame`` stays an unevaluated query.
+    """
+    vc = df.group_by(cs.by_name(alias)).len(name="count")
+    if sort:
+        vc = vc.sort([pl.col("count"), cs.by_name(alias)], descending=[True, False])
+    return vc
+
+
 def get_value_counts(
     df: pl.DataFrame | pl.LazyFrame,
     alias: str,
     sort: bool = True,
 ) -> pl.DataFrame:
     """Count occurrences of each distinct value in one column.
+
+    A ``LazyFrame`` is aggregated before it is collected, so only one row per
+    distinct value is materialized.
 
     Parameters
     ----------
@@ -87,9 +118,10 @@ def get_value_counts(
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
     """
-    vc = _collect(df, cs.by_name(alias)).to_series().value_counts()
-    if sort:
-        vc = vc.sort([pl.col("count"), cs.by_name(alias)], descending=[True, False])
+    _require_frame(df)
+    vc = _value_counts_query(df, alias, sort)
+    if isinstance(vc, pl.LazyFrame):
+        return vc.collect()
     return vc
 
 
@@ -158,17 +190,24 @@ def get_schema(
     Returns
     -------
     dict[str, pl.DataType]
-        Column names mapped to their dtypes.
+        Column names mapped to their dtypes, in the order of ``args`` when
+        given.
 
     Raises
     ------
     TypeError
         If ``df`` is neither a ``pl.DataFrame`` nor a ``pl.LazyFrame``.
+    polars.exceptions.ColumnNotFoundError
+        If a name in ``args`` is not a column of ``df``.
     """
     _require_frame(df)
-    if args:
-        df = df.select(args)
-    return df.collect_schema()
+    schema = df.collect_schema()
+    if not args:
+        return schema
+    missing = [name for name in args if name not in schema]
+    if missing:
+        raise pl.exceptions.ColumnNotFoundError(f"columns not found: {missing}")
+    return pl.Schema({name: schema[name] for name in args})
 
 
 def get_numeric_args(

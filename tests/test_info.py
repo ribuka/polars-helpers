@@ -59,6 +59,25 @@ def test_get_columns_and_schema_keep_column_order(
     }
 
 
+@pytest.mark.parametrize("lazy", [False, True])
+def test_get_schema_reads_listed_names_literally(lazy: bool) -> None:
+    """Look up ``args`` by name, so ``*`` is one column, not every column."""
+    frame = pl.DataFrame({"other": [1], "*": ["x"]})
+    source = frame.lazy() if lazy else frame
+
+    assert dict(plh.get_schema(source, ["*"])) == {"*": pl.String}
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_get_schema_rejects_unknown_names(lazy: bool) -> None:
+    """Raise ``ColumnNotFoundError`` for a name that is not a column."""
+    frame = pl.DataFrame({"a": [1]})
+    source = frame.lazy() if lazy else frame
+
+    with pytest.raises(pl.exceptions.ColumnNotFoundError, match="missing"):
+        plh.get_schema(source, ["a", "missing"])
+
+
 @pytest.mark.parametrize("helper", [plh.get_shape, plh.get_columns, plh.get_schema])
 def test_info_helpers_reject_non_frames(helper: Callable[..., object]) -> None:
     """Raise ``TypeError`` for inputs that are not polars frames."""
