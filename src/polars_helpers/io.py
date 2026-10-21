@@ -49,7 +49,12 @@ def _detect_skip_lines(
             "has_header=False contradicts header detection; "
             "use polars directly to read a CSV without a header."
         )
-    return detect_csv_skip_lines(source, separator=separator, encoding=encoding)
+    return detect_csv_skip_lines(
+        source,
+        separator=separator,
+        quote_char=kwargs.get("quote_char", '"'),
+        encoding=encoding,
+    )
 
 
 def read_csv(

@@ -248,6 +248,32 @@ def test_scan_csv_returns_lazy_frame(tmp_path: Path) -> None:
     assert result.collect().equals(pl.read_csv(_write(tmp_path, _TABLE)))
 
 
+@pytest.mark.parametrize("lazy", [False, True])
+def test_csv_readers_read_quotes_as_text_without_quote_char(
+    tmp_path: Path, lazy: bool
+) -> None:
+    """Pass ``quote_char=None`` to the header detection as well."""
+    path = _write(tmp_path, 'Name,Value\n12" pipe,1\nplain,2\nother,3\n')
+
+    if lazy:
+        frame = plh.scan_csv(path, quote_char=None).collect()
+    else:
+        frame = plh.read_csv(path, quote_char=None)
+
+    assert frame["Name"].to_list() == ['12" pipe', "plain", "other"]
+
+
+def test_detect_csv_skip_lines_reads_quotes_as_text_without_quote_char(
+    tmp_path: Path,
+) -> None:
+    """Read a leading quote as text when ``quote_char`` is ``None``."""
+    path = _write(tmp_path, 'Name,Value\n"multi,1\nline",2\na,3\nb,4\n')
+
+    assert detect_csv_skip_lines(path, quote_char=None) == 0
+    with pytest.raises(ValueError, match="spans lines"):
+        detect_csv_skip_lines(path)
+
+
 @pytest.mark.parametrize("reader", [plh.read_csv, plh.scan_csv])
 @pytest.mark.parametrize(
     "kwargs",
