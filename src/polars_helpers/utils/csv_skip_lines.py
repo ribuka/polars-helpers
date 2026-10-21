@@ -188,7 +188,10 @@ def detect_csv_skip_lines(
     or date/time) of the lines below it. If no line does (for example every
     column is text, or the column names are numbers), the top of the block is
     the header; the block always starts at the file start or after an empty
-    line or a change of field count.
+    line or a change of field count. Lines above the block with the table
+    width must contradict the column types too, so that an empty line, a
+    ragged line, or a quoted line break inside the data never makes the
+    table before it be skipped silently.
 
     Pass the result as ``skip_lines=`` (not ``skip_rows=``) to
     ``pl.read_csv`` or ``pl.scan_csv``: it counts physical lines, and
@@ -196,7 +199,8 @@ def detect_csv_skip_lines(
 
     Known limitations: metadata with the same field count as the table and no
     empty line before the header is told apart only through type cues, so
-    with all-text columns its first line is taken as the header; and a
+    with all-text columns its first line is taken as the header (and with
+    all-text columns, same-width metadata before an empty line raises); and a
     two-line header directly under three or more such metadata lines is read
     as metadata plus a one-line header.
 
@@ -221,9 +225,10 @@ def detect_csv_skip_lines(
     ValueError
         If the file is empty; the last line has fewer than 2 fields; fewer
         than 2 data lines follow the header (also when the last lines do not
-        share one field count); the header
-        looks like two lines (for example names and units); or lines that fit
-        the data types sit above the detected header. The message shows the
+        share one field count); the header looks like two lines (for example
+        names and units); or lines of the table width that fit the data types
+        sit above the detected header, even before an empty line or a
+        field-count change. The message shows the
         width and the candidate lines so that ``skip_lines`` can be given by
         hand instead.
     """
@@ -266,8 +271,25 @@ def detect_csv_skip_lines(
             f"(width {width}):\n{candidates}"
         )
 
+    types = _column_types(kinds)
+    # A line of the table width that fits the data above the block means the
+    # table may already start before an empty line, a ragged line, or a
+    # quoted line break inside the data.
+    data_like = [
+        number
+        for number in range(start)
+        if len(rows[number]) == width and not _is_header_like(rows[number], types)
+    ]
+    if data_like:
+        raise ValueError(
+            f"Lines that fit the data of {source} sit before the empty line or "
+            f"field-count change at line {start - 1} (width {width}):\n"
+            + "\n".join(_describe(rows, n, n + 1) for n in data_like[-3:])
+            + "\n"
+            + _describe(rows, start - 1, header + 2)
+        )
+
     if header > start:
-        types = _column_types(kinds)
         above = [_is_header_like(rows[n], types) for n in range(start, header)]
         if not all(above):
             raise ValueError(

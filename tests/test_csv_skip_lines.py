@@ -176,6 +176,26 @@ def test_detect_csv_skip_lines_finds_header(
             "fit the data",
             id="text-inside-numeric-data",
         ),
+        pytest.param(
+            "Name,Value\na,1\n\nb,2\nc,3\nd,4\ne,5\n",
+            "fit the data",
+            id="empty-line-inside-data",
+        ),
+        pytest.param(
+            "Time,Pressure\n0,100\n1,101,9\n2,102\n3,103\n4,104\n",
+            "fit the data",
+            id="ragged-line-inside-data",
+        ),
+        pytest.param(
+            'Time,Note\n0,"a\nb"\n1,c\n2,d\n3,e\n',
+            "fit the data",
+            id="quoted-line-break-inside-data",
+        ),
+        pytest.param(
+            "Key,Value\nk1,v1\n\nName,City\nalice,tokyo\nbob,osaka\n",
+            "fit the data",
+            id="all-text-same-width-metadata-before-empty-line",
+        ),
     ],
 )
 def test_detect_csv_skip_lines_raises_when_unsure(
