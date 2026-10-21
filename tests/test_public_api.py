@@ -16,7 +16,9 @@ def test_public_api_exports_every_name() -> None:
         "get_unique_values",
         "get_value_counts",
         "merge",
+        "read_csv",
         "safe_write_csv",
+        "scan_csv",
     ]
     for name in plh.__all__:
         assert hasattr(plh, name)
