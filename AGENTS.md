@@ -13,6 +13,7 @@
 - Function names do not repeat "polars" (e.g. `get_shape`, not a `get_shape_...polars` variant); the package name already says they are for polars.
 - `polars_helpers.utils` holds helpers that do not depend on polars (e.g. `natural_keys`); they are not re-exported from the top level.
 - The lower bound of `polars` in `pyproject.toml` is the oldest version the CI `test-lowest` job tests. Raise it when a helper starts to need a newer polars API.
+- The lower bound of `requires-python` in `pyproject.toml` is the Python version the CI `test-lowest` job tests. Raise it when the code starts to need newer Python syntax or standard library features.
 
 ## Python
 
