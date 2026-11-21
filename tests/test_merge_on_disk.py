@@ -30,16 +30,35 @@ _RESULT = re.compile(r"merge-[0-9a-f]{32}-\d{5}\.parquet")
 HOWS: list[plh.HOW] = ["left", "inner", "right", "full"]
 
 
+# ``_restore_limit`` before ``small_restore`` replaces it.
+_restore_limit = merge_on_disk_module._restore_limit
+
+
 @pytest.fixture(autouse=True)
-def small_restore_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Put the rows back in order three row numbers at a time.
+def small_restore(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Put the merged rows back in order a few at a time.
+
+    The rows are counted by intervals of ten row numbers. Parametrize it
+    indirectly with the most merged rows of one range; the default ``3``
+    makes almost every interval be counted again row number by row number,
+    while ``50`` groups whole intervals into one range.
 
     Parameters
     ----------
+    request : pytest.FixtureRequest
+        Request whose ``param``, if any, is the most merged rows of one range.
     monkeypatch : pytest.MonkeyPatch
-        Fixture used to shrink ``_RESTORE_ROWS``.
+        Fixture used to replace ``_restore_limit`` and ``_COUNT_BLOCK``.
+
+    Returns
+    -------
+    int
+        Most merged rows of one range.
     """
-    monkeypatch.setattr(merge_on_disk_module, "_RESTORE_ROWS", 3)
+    limit: int = getattr(request, "param", 3)
+    monkeypatch.setattr(merge_on_disk_module, "_restore_limit", lambda merged: limit)
+    monkeypatch.setattr(merge_on_disk_module, "_COUNT_BLOCK", 10)
+    return limit
 
 
 def _key_values(kind: str, ids: list[int | None]) -> dict[str, list[Any]]:
@@ -119,6 +138,7 @@ def _frames(
     return left, right, keys
 
 
+@pytest.mark.parametrize("small_restore", [3, 50], indirect=True)
 @pytest.mark.parametrize("how", HOWS)
 @pytest.mark.parametrize("kind", ["int", "str", "int_str", "named"])
 @pytest.mark.parametrize("right_unique", [True, False])
@@ -140,6 +160,7 @@ def test_merge_on_disk_matches_merge(
         assert got.equals(expected), (buckets, indicator, columns)
 
 
+@pytest.mark.parametrize("small_restore", [3, 50], indirect=True)
 @pytest.mark.parametrize("how", HOWS)
 @pytest.mark.parametrize("buckets", [1, 4])
 def test_merge_on_disk_matches_merge_with_different_key_types(
@@ -158,6 +179,7 @@ def test_merge_on_disk_matches_merge_with_different_key_types(
     assert got.schema == expected.schema
 
 
+@pytest.mark.parametrize("small_restore", [3, 50], indirect=True)
 @pytest.mark.parametrize("how", HOWS)
 @pytest.mark.parametrize("buckets", [1, 4])
 @pytest.mark.parametrize("empty_side", ["left", "right", "both"])
@@ -177,6 +199,115 @@ def test_merge_on_disk_with_empty_input(
     ).collect()
     assert got.equals(expected)
     assert got.schema == expected.schema
+
+
+def _wide_frame(rows: int) -> pl.LazyFrame:
+    """Build a frame of two UInt32 and fifty Float64 columns, 408 bytes a row.
+
+    Parameters
+    ----------
+    rows : int
+        Number of rows.
+
+    Returns
+    -------
+    pl.LazyFrame
+        Frame like the merged rows of a wide table with its row numbers.
+    """
+    return pl.select(
+        *(pl.int_range(rows, dtype=pl.UInt32).alias(f"r{i}") for i in range(2)),
+        *(pl.int_range(rows).cast(pl.Float64).alias(f"f{i}") for i in range(50)),
+    ).lazy()
+
+
+@pytest.mark.parametrize(
+    ("frame", "restore_bytes", "expected"),
+    [
+        (_wide_frame(20_000), 408 * 1000, 1000),
+        (_wide_frame(20_000), None, 2_631_720),
+        (_wide_frame(0), None, merge_on_disk_module._RESTORE_ROWS),
+        (_wide_frame(20_000), 1, 1),
+        (pl.LazyFrame({"k": list(range(100))}), None, merge_on_disk_module._RESTORE_ROWS),
+    ],
+    ids=["budget", "default", "empty", "at_least_one", "at_most_restore_rows"],
+)
+def test_restore_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    frame: pl.LazyFrame,
+    restore_bytes: int | None,
+    expected: int,
+) -> None:
+    """Divide the memory budget by the size of one row of the first rows."""
+    if restore_bytes is not None:
+        monkeypatch.setattr(merge_on_disk_module, "_RESTORE_BYTES", restore_bytes)
+    assert _restore_limit(frame) == expected
+
+
+@pytest.mark.parametrize(
+    ("units", "limit", "expected"),
+    [
+        ([(0, 10, 4), (10, 20, 4), (20, 30, 4)], 8, [(0, 20), (20, 30)]),
+        ([(0, 1, 2), (1, 2, 20), (2, 3, 2)], 8, [(0, 1), (1, 2), (2, 3)]),
+        ([(0, 10, 3), (30, 40, 3)], 8, [(0, 40)]),
+        ([], 8, []),
+    ],
+    ids=["group", "too_many", "gap", "empty"],
+)
+def test_split_ranges(
+    units: list[tuple[int, int, int]], limit: int, expected: list[tuple[int, int]]
+) -> None:
+    """Group neighboring units while their rows fit in one range."""
+    assert merge_on_disk_module._split_ranges(units, limit) == expected
+
+
+def _result_files(directory: Path) -> list[pl.DataFrame]:
+    """Read the result files of ``merge_on_disk`` one by one, in order.
+
+    Parameters
+    ----------
+    directory : Path
+        Directory the result was written in.
+
+    Returns
+    -------
+    list[pl.DataFrame]
+        Contents of each result file.
+    """
+    files = sorted(f for f in directory.iterdir() if _RESULT.fullmatch(f.name))
+    return [pl.read_parquet(f) for f in files]
+
+
+@pytest.mark.parametrize("small_restore", [25], indirect=True)
+@pytest.mark.parametrize("how", HOWS)
+def test_merge_on_disk_limits_rows_with_duplicate_keys(
+    tmp_path: Path, small_restore: int, how: plh.HOW
+) -> None:
+    """Keep each range within the limit when duplicate keys multiply rows."""
+    left = pl.LazyFrame({"k": [i // 10 for i in range(30)], "a": list(range(30))})
+    right = pl.LazyFrame({"k": [i // 10 for i in range(30)], "b": list(range(30))})
+    expected = plh.merge(left, right, on="k", how=how).collect()
+    got = plh.merge_on_disk(left, right, on="k", how=how, directory=tmp_path, buckets=2)
+    parts = _result_files(tmp_path)
+    assert len(parts) > 1
+    assert all(part.height <= small_restore for part in parts)
+    assert got.collect().equals(expected)
+
+
+@pytest.mark.parametrize("small_restore", [25], indirect=True)
+def test_merge_on_disk_keeps_one_row_with_many_matches_together(
+    tmp_path: Path, small_restore: int
+) -> None:
+    """Put the rows of one left row in one range even beyond the limit."""
+    left = pl.LazyFrame({"k": [0, 1, 2], "a": [10, 11, 12]})
+    right = pl.LazyFrame({"k": [1] * 40, "b": list(range(40))})
+    expected = plh.merge(left, right, on="k").collect()
+    got = plh.merge_on_disk(left, right, on="k", directory=tmp_path, buckets=2)
+    parts = _result_files(tmp_path)
+    large = [part for part in parts if part.height > small_restore]
+    assert len(large) == 1
+    assert large[0].height == 40
+    assert large[0]["a"].unique().to_list() == [11]
+    assert got.collect().equals(expected)
 
 
 def _string_and_int_keys() -> tuple[pl.LazyFrame, pl.LazyFrame]:
