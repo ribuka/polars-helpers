@@ -342,6 +342,12 @@ def test_invalid_columns(
     assert not root.exists()
 
 
+def test_repeated_columns_are_named(tmp_path: Path) -> None:
+    """Name each repeated column once, sorted, in the error."""
+    with pytest.raises(ValueError, match=r"\['x', 'y'\]$"):
+        scan(tmp_path / "missing.parquet", tmp_path / "cache", columns=["y", "x", "z", "x", "y"])
+
+
 # ----------------------------------------------------------------- types
 
 
@@ -425,6 +431,13 @@ CASES: dict[str, list[pl.DataFrame]] = {
         pl.DataFrame({"c": [None, None]}, schema={"c": pl.Null}),
         pl.DataFrame({"c": [1, None]}, schema={"c": pl.Int16}),
     ],
+    "same types around a change": [
+        pl.DataFrame({"c": [1]}, schema={"c": pl.Int8}),
+        pl.DataFrame({"c": [2]}, schema={"c": pl.Int8}),
+        pl.DataFrame({"c": [300]}, schema={"c": pl.Int16}),
+        pl.DataFrame({"c": [3]}, schema={"c": pl.Int8}),
+        pl.DataFrame({"c": [400]}, schema={"c": pl.Int16}),
+    ],
     "all null type": [
         pl.DataFrame({"c": [None]}, schema={"c": pl.Null}),
         pl.DataFrame({"c": [None, None]}, schema={"c": pl.Null}),
@@ -441,6 +454,16 @@ def test_matches_diagonal_relaxed(tmp_path: Path, name: str) -> None:
     for ttl in (None, 1):
         out = scan(files, tmp_path / f"cache-{ttl}", cache_ttl_days=ttl).collect()
         assert_frame_equal(out, expected)
+
+
+def test_same_types_skip_concat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Find the common type without ``pl.concat`` when every type is the same."""
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("pl.concat was called")
+
+    monkeypatch.setattr(pl, "concat", fail)
+    found = [(Path(f"f{i}.parquet"), pl.Datetime("ms", "UTC")) for i in range(3)]
+    assert parquet._common_dtype("t", found) == pl.Datetime("ms", "UTC")
 
 
 def test_no_common_type(tmp_path: Path) -> None:

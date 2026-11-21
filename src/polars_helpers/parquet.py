@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -60,7 +61,7 @@ def _check_columns(columns: Sequence[str] | None) -> list[str] | None:
             raise TypeError(f"columns must hold only str, got {type(name)}")
     if not names:
         raise ValueError("columns must not be empty")
-    duplicated = sorted({name for name in names if names.count(name) > 1})
+    duplicated = sorted(name for name, count in Counter(names).items() if count > 1)
     if duplicated:
         raise ValueError(f"columns names a column more than once: {duplicated}")
     return names
@@ -266,6 +267,8 @@ def _common_dtype(name: str, found: list[tuple[Path, pl.DataType]]) -> pl.DataTy
     """
     dtype = found[0][1]
     for i, (path, other) in enumerate(found[1:], start=1):
+        if other.is_(dtype):
+            continue
         try:
             dtype = pl.concat(
                 [pl.DataFrame(schema={name: dtype}), pl.DataFrame(schema={name: other})],
