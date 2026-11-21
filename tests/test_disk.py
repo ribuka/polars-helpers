@@ -517,13 +517,15 @@ def test_files_left_on_exit_are_collected_later(
 
     with monkeypatch.context() as m:
         m.setattr(Path, "unlink", unlink)
+        # Checking the file fails too, as without permission on its folder.
+        m.setattr(os.path, "lexists", lambda path: False)
+        m.setattr(os.path, "exists", lambda path: False)
         session.close()
-        assert not done.exists()
-        assert session.json_path.exists() and session.lock_path.exists()
-        data = json.loads(session.json_path.read_text(encoding="utf-8"))
-        assert data["files"] == [str(busy)]
         _disk.collect_stale_sessions(root)
-        assert busy.exists() and session.json_path.exists()
+    assert not done.exists()
+    assert busy.exists() and session.json_path.exists() and session.lock_path.exists()
+    data = json.loads(session.json_path.read_text(encoding="utf-8"))
+    assert data["files"] == [str(busy)]
     _disk.collect_stale_sessions(root)
     assert not busy.exists()
     assert session_files(root) == []

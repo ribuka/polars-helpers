@@ -561,11 +561,19 @@ def _delete_registered(files: list[str]) -> list[str]:
     Returns
     -------
     list[str]
-        Paths of the files that still exist, because they could not be
-        deleted.
+        Paths of the files that may still exist: a file is dropped only once
+        it is deleted or known to be missing, never because checking it
+        failed, for example without permission.
     """
-    delete_paths(Path(f) for f in files)
-    return [f for f in files if os.path.lexists(f)]
+    left: list[str] = []
+    for file in files:
+        try:
+            Path(file).unlink()
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError:
+            left.append(file)
+    return left
 
 
 _sessions: dict[tuple[int, str], Session] = {}
