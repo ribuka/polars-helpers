@@ -5,6 +5,7 @@
 - This repository is in development (0.x); backward compatibility is NOT required.
   - NEVER add or keep compatibility layers, deprecated aliases, or re-exports for old names.
   - When the public API (`__all__` of `polars_helpers`) changes, update `README.md` and the tests in the same change.
+  - When the public API changes, also update `docs/<name>.md` of each helper it affects in the same change; `tests/test_docs.py` runs their examples and compares their output.
 
 ## Package rules
 

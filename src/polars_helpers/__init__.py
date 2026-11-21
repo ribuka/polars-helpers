@@ -18,6 +18,7 @@ from .info import (
 from .io import read_csv, safe_write_csv, scan_csv
 from .merge import HOW, merge
 from .merge_on_disk import merge_on_disk
+from .parquet import scan_parquet_relaxed
 
 __all__ = [
     "HOW",
@@ -34,4 +35,5 @@ __all__ = [
     "read_csv",
     "safe_write_csv",
     "scan_csv",
+    "scan_parquet_relaxed",
 ]

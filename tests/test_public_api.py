@@ -20,6 +20,7 @@ def test_public_api_exports_every_name() -> None:
         "read_csv",
         "safe_write_csv",
         "scan_csv",
+        "scan_parquet_relaxed",
     ]
     for name in plh.__all__:
         assert hasattr(plh, name)
