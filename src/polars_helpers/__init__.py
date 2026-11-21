@@ -17,6 +17,7 @@ from .info import (
 )
 from .io import read_csv, safe_write_csv, scan_csv
 from .merge import HOW, merge
+from .merge_on_disk import merge_on_disk
 
 __all__ = [
     "HOW",
@@ -29,6 +30,7 @@ __all__ = [
     "get_unique_values",
     "get_value_counts",
     "merge",
+    "merge_on_disk",
     "read_csv",
     "safe_write_csv",
     "scan_csv",

@@ -10,10 +10,11 @@ n_rows, n_cols = plh.get_shape(lazy_frame)  # does not collect the frame
 ```
 
 - Helpers accept both `pl.DataFrame` and `pl.LazyFrame` where they can, and
-  return the same kind they were given.
+  return the same kind they were given. `merge_on_disk` is the exception: it
+  accepts only `pl.LazyFrame` and always returns a `pl.LazyFrame`.
 - A `LazyFrame` is never collected just to read its schema or shape.
 - Nothing is printed unless `verbose=True` is passed.
-- The package depends only on polars (1.18 or later).
+- The package depends only on polars (2.0 or later).
 
 ## Install
 
@@ -28,6 +29,7 @@ See the docstrings for arguments and details.
 | Name | Description |
 |---|---|
 | `merge` | Join two frames like `pandas.merge`, with coalesced keys, an indicator column, and a deterministic row order (pandas-compatible except for `how="full"`). |
+| `merge_on_disk` | Get the same result as `merge` with little memory by keeping the intermediate data on disk; the result is written to Parquet and returned as a `LazyFrame` that reads it. Accepts only `LazyFrame`. |
 | `HOW` | The join strategies `merge` accepts. |
 | `get_shape` | `(rows, columns)`. |
 | `get_columns` | Column names. |
