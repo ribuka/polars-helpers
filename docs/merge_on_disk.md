@@ -115,8 +115,9 @@ print(out.collect().rows())
 ## Things to know
 
 - **Disk.** With `buckets` of 2 or more, the call holds, at its peak, a copy
-  of both sides and about twice the result on disk, as Parquet. A write fails
-  when the disk is full. The working files are deleted before the call
+  of both sides and about twice the result on disk, as Parquet. While a side
+  is split into buckets, a copy of that side is also on disk; it is deleted
+  once the side is split. A write fails when the disk is full. The working files are deleted before the call
   returns, and everything the call wrote is deleted when it fails.
 - **Memory.** Collecting the whole returned frame loads the result into
   memory like any collect. For a large result, aggregate it, or write it with

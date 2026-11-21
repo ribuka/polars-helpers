@@ -30,15 +30,18 @@ _RESULT = re.compile(r"merge-[0-9a-f]{32}-\d{5}\.parquet")
 HOWS: list[plh.HOW] = ["left", "inner", "right", "full"]
 
 
-# ``_restore_limit`` before ``small_restore`` replaces it.
+# ``_restore_limit`` and ``_slice_rows`` before ``small_restore`` replaces them.
 _restore_limit = merge_on_disk_module._restore_limit
+_slice_rows = merge_on_disk_module._slice_rows
 
 
 @pytest.fixture(autouse=True)
 def small_restore(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> int:
-    """Put the merged rows back in order a few at a time.
+    """Put the merged rows back in order, and split each side, a few at a time.
 
-    The rows are counted by intervals of ten row numbers. Parametrize it
+    Each side is numbered and split 64 rows at a time, so the left frame of
+    ``_frames`` is split in four slices and the right frame in one. The
+    merged rows are counted by intervals of ten row numbers. Parametrize it
     indirectly with the most merged rows of one range; the default ``3``
     makes almost every interval be counted again row number by row number,
     while ``50`` groups whole intervals into one range.
@@ -48,7 +51,8 @@ def small_restore(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
     request : pytest.FixtureRequest
         Request whose ``param``, if any, is the most merged rows of one range.
     monkeypatch : pytest.MonkeyPatch
-        Fixture used to replace ``_restore_limit`` and ``_COUNT_BLOCK``.
+        Fixture used to replace ``_restore_limit``, ``_slice_rows``, and
+        ``_COUNT_BLOCK``.
 
     Returns
     -------
@@ -57,6 +61,7 @@ def small_restore(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
     """
     limit: int = getattr(request, "param", 3)
     monkeypatch.setattr(merge_on_disk_module, "_restore_limit", lambda merged: limit)
+    monkeypatch.setattr(merge_on_disk_module, "_slice_rows", lambda frame: 64)
     monkeypatch.setattr(merge_on_disk_module, "_COUNT_BLOCK", 10)
     return limit
 
@@ -231,7 +236,7 @@ def _wide_frame(rows: int) -> pl.LazyFrame:
     ],
     ids=["budget", "default", "empty", "at_least_one", "at_most_restore_rows"],
 )
-def test_restore_limit(
+def test_rows_per_pass(
     monkeypatch: pytest.MonkeyPatch,
     frame: pl.LazyFrame,
     restore_bytes: int | None,
@@ -240,7 +245,48 @@ def test_restore_limit(
     """Divide the memory budget by the size of one row of the first rows."""
     if restore_bytes is not None:
         monkeypatch.setattr(merge_on_disk_module, "_RESTORE_BYTES", restore_bytes)
+    assert merge_on_disk_module._rows_per_pass(frame) == expected
+
+
+@pytest.mark.parametrize("frame", [_wide_frame(20_000)], ids=["wide"])
+def test_slice_rows_and_restore_limit_use_rows_per_pass(frame: pl.LazyFrame) -> None:
+    """Choose the rows of a slice and of a restored range in the same way."""
+    expected = merge_on_disk_module._rows_per_pass(frame)
+    assert _slice_rows(frame) == expected
     assert _restore_limit(frame) == expected
+
+
+@pytest.mark.parametrize("how", HOWS)
+@pytest.mark.parametrize("buckets", [2, 7])
+def test_merge_on_disk_matches_merge_with_small_slices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: plh.HOW, buckets: int
+) -> None:
+    """Match ``merge`` when each side is numbered and split 7 rows at a time."""
+    monkeypatch.setattr(merge_on_disk_module, "_slice_rows", lambda frame: 7)
+    left, right, keys = _frames("int", False, True, seed=0)
+    expected = plh.merge(left, right, how=how, **keys).collect()
+    got = plh.merge_on_disk(left, right, how=how, **keys, directory=tmp_path, buckets=buckets)
+    assert got.collect().equals(expected)
+
+
+def test_merge_on_disk_deletes_copy_before_merging_buckets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delete the copy of each side once it is split, before any bucket is merged."""
+    counts: list[int] = []
+    real_merge = merge_on_disk_module.merge
+
+    def counting_merge(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        counts.append(len(list(tmp_path.rglob("input.parquet"))))
+        return real_merge(*args, **kwargs)
+
+    monkeypatch.setattr(merge_on_disk_module, "merge", counting_merge)
+    left, right, keys = _frames("int", True, False, seed=0)
+    expected = plh.merge(left, right, **keys).collect()
+    got = plh.merge_on_disk(left, right, **keys, directory=tmp_path, buckets=4)
+    assert len(counts) >= 2
+    assert counts == [0] * len(counts)
+    assert got.collect().equals(expected)
 
 
 @pytest.mark.parametrize(

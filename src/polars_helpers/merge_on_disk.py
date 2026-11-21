@@ -21,14 +21,16 @@ _BUCKET = "__polars_helpers_bucket"
 # Fixed seed of the key hash, so both sides put equal keys in one bucket.
 _HASH_SEED = 0
 
-# Target ``estimated_size()`` of the merged rows put back in order at a time;
-# sorting them makes the peak about twice as large.
+# Target ``estimated_size()`` of the merged rows put back in order at a time,
+# and of the rows of one side numbered and split at a time; sorting the
+# merged rows makes the peak about twice as large.
 _RESTORE_BYTES = 1 << 30
 
-# Most merged rows put back in order at a time, however narrow they are.
+# Most rows put back in order, or numbered and split, at a time, however
+# narrow they are.
 _RESTORE_ROWS = 10_000_000
 
-# Merged rows read from the start to measure the size of one row.
+# Rows read from the start to measure the size of one row.
 _SAMPLE_ROWS = 10_000
 
 # Width of the intervals of row numbers whose merged rows are counted first;
@@ -168,34 +170,57 @@ def _align_full_keys(
     return frame.with_columns(casts) if casts else frame
 
 
-def _partition(frame: pl.LazyFrame, bucket: pl.Expr, directory: Path) -> dict[int, list[Path]]:
-    """Write a frame split into buckets and list the files of each bucket.
+def _partition(
+    frame: pl.LazyFrame, row: str, bucket: pl.Expr, directory: Path
+) -> dict[int, list[Path]]:
+    """Write a frame split into buckets, with row numbers, and list the files.
+
+    The frame is first copied to ``input.parquet`` in ``directory``; its rows
+    are then numbered and split a slice of ``_slice_rows`` rows at a time,
+    into ``directory/<slice>/``, so that the memory does not grow with the
+    number of rows. The copy is deleted once every slice is split.
 
     Parameters
     ----------
     frame : pl.LazyFrame
-        Frame to split.
+        Frame to split, without its row numbers.
+    row : str
+        Name of the row-number column to add, numbered from ``0``.
     bucket : pl.Expr
         Bucket of each row, from ``_bucket_expr``.
     directory : Path
-        Directory to write the buckets under.
+        Directory to write the copy and the buckets under.
 
     Returns
     -------
     dict[int, list[Path]]
-        Files of each bucket that holds rows, in the order they were written.
+        Files of each bucket that holds rows, in the order of the slices and,
+        within a slice, of their names.
     """
-    frame.sink_parquet(
-        pl.PartitionBy(directory, key=bucket, include_key=False),
-        engine="streaming",
-        mkdir=True,
-    )
+    directory.mkdir(parents=True, exist_ok=True)
+    source = directory / "input.parquet"
+    frame.sink_parquet(source, engine="streaming")
+    total: int = pl.scan_parquet(source).select(pl.len()).collect().item()
     files: dict[int, list[Path]] = {}
-    if not directory.is_dir():
-        return files
-    for sub in directory.iterdir():
-        if sub.is_dir():
-            files[int(sub.name.rpartition("=")[2])] = sorted(sub.glob("*.parquet"))
+    if total:
+        rows = _slice_rows(pl.scan_parquet(source))
+        for n, offset in enumerate(range(0, total, rows)):
+            sub = directory / f"{n:05d}"
+            pl.scan_parquet(source).slice(offset, rows).with_row_index(
+                row, offset=offset
+            ).sink_parquet(
+                pl.PartitionBy(sub, key=bucket, include_key=False),
+                engine="streaming",
+                mkdir=True,
+            )
+            if not sub.is_dir():
+                continue
+            for part in sub.iterdir():
+                if part.is_dir():
+                    files.setdefault(int(part.name.rpartition("=")[2]), []).extend(
+                        sorted(part.glob("*.parquet"))
+                    )
+    source.unlink()
     return files
 
 
@@ -219,6 +244,31 @@ def _scan(files: list[Path], schema: pl.Schema) -> pl.LazyFrame:
     return pl.scan_parquet(files)
 
 
+def _rows_per_pass(frame: pl.LazyFrame) -> int:
+    """Choose how many rows of a frame to hold in memory at a time.
+
+    Parameters
+    ----------
+    frame : pl.LazyFrame
+        Rows to process a part at a time.
+
+    Returns
+    -------
+    int
+        ``_RESTORE_BYTES`` divided by the size of one row, measured with
+        ``estimated_size()`` on the first ``_SAMPLE_ROWS`` rows; at most
+        ``_RESTORE_ROWS`` and at least ``1``. ``_RESTORE_ROWS`` if there are
+        no rows.
+    """
+    sample = frame.head(_SAMPLE_ROWS).collect()
+    if sample.height == 0:
+        return _RESTORE_ROWS
+    width = sample.estimated_size() / sample.height
+    if width <= 0:
+        return _RESTORE_ROWS
+    return max(1, min(_RESTORE_ROWS, int(_RESTORE_BYTES // width)))
+
+
 def _restore_limit(merged: pl.LazyFrame) -> int:
     """Choose how many merged rows to put back in order at a time.
 
@@ -230,18 +280,25 @@ def _restore_limit(merged: pl.LazyFrame) -> int:
     Returns
     -------
     int
-        ``_RESTORE_BYTES`` divided by the size of one row, measured with
-        ``estimated_size()`` on the first ``_SAMPLE_ROWS`` rows; at most
-        ``_RESTORE_ROWS`` and at least ``1``. ``_RESTORE_ROWS`` if there are
-        no rows.
+        ``_rows_per_pass(merged)``.
     """
-    sample = merged.head(_SAMPLE_ROWS).collect()
-    if sample.height == 0:
-        return _RESTORE_ROWS
-    width = sample.estimated_size() / sample.height
-    if width <= 0:
-        return _RESTORE_ROWS
-    return max(1, min(_RESTORE_ROWS, int(_RESTORE_BYTES // width)))
+    return _rows_per_pass(merged)
+
+
+def _slice_rows(frame: pl.LazyFrame) -> int:
+    """Choose how many rows of one side to number and split at a time.
+
+    Parameters
+    ----------
+    frame : pl.LazyFrame
+        Copy of one side, without its row numbers.
+
+    Returns
+    -------
+    int
+        ``_rows_per_pass(frame)``.
+    """
+    return _rows_per_pass(frame)
 
 
 def _split_ranges(units: list[tuple[int, int, int]], limit: int) -> list[tuple[int, int]]:
@@ -391,7 +448,9 @@ def merge_on_disk(
     returned, unlike the other helpers that accept both kinds.
 
     With ``buckets >= 2``, both sides are split on disk into buckets by the
-    hash of their keys, each bucket is merged with ``merge``, and the merged
+    hash of their keys: each side is first copied to Parquet, its rows are
+    numbered and split about 1 GiB at a time, and the copy is deleted once
+    it is split. Each bucket is then merged with ``merge``, and the merged
     rows are put back in order a range of row numbers at a time. With
     ``buckets=1``, ``merge`` is written in one go with the streaming engine.
 
@@ -560,18 +619,18 @@ def merge_on_disk(
             left_row, right_row, bucket_name = _temporary_names(
                 taken, [_LEFT_ROW, _RIGHT_ROW, _BUCKET]
             )
-            left_numbered = left.with_row_index(left_row)
-            right_numbered = right.with_row_index(right_row)
-
             left_files = _partition(
-                left_numbered, _bucket_expr(left_keys, dtypes, buckets, bucket_name), work / "left"
+                left, left_row, _bucket_expr(left_keys, dtypes, buckets, bucket_name), work / "left"
             )
             right_files = _partition(
-                right_numbered, _bucket_expr(right_keys, dtypes, buckets, bucket_name), work / "right"
+                right,
+                right_row,
+                _bucket_expr(right_keys, dtypes, buckets, bucket_name),
+                work / "right",
             )
 
-            left_schema = left_numbered.collect_schema()
-            right_schema = right_numbered.collect_schema()
+            left_schema = left.with_row_index(left_row).collect_schema()
+            right_schema = right.with_row_index(right_row).collect_schema()
             merged_dir = work / "merged"
             merged_dir.mkdir(parents=True, exist_ok=True)
             merged_files: list[Path] = []
