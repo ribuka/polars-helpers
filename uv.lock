@@ -74,7 +74,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "polars", specifier = ">=1.18" }]
+requires-dist = [{ name = "polars", specifier = ">=2.0" }]
 
 [package.metadata.requires-dev]
 dev = [

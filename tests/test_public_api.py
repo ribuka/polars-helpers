@@ -16,6 +16,7 @@ def test_public_api_exports_every_name() -> None:
         "get_unique_values",
         "get_value_counts",
         "merge",
+        "merge_on_disk",
         "read_csv",
         "safe_write_csv",
         "scan_csv",
