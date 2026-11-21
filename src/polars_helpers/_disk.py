@@ -43,6 +43,10 @@ _SESSION_MARKER = "polars-helpers-session"
 # Interval of the retries of a blocking lock on Windows, in seconds.
 _LOCK_RETRY_SECONDS = 0.02
 
+# Longest time, in seconds, a lock file may refuse to open on Windows while
+# another process deletes it, before the refusal is raised.
+_PENDING_DELETE_SECONDS = 2.0
+
 
 def default_root() -> Path:
     """Find the default directory of the files the helpers write.
@@ -307,12 +311,20 @@ def lock_file(path: Path, *, blocking: bool, create: bool = True) -> int | None:
     -------
     int | None
         Descriptor of the locked file, to pass to ``unlock_file``; ``None``
-        if the lock is held by someone else and ``blocking`` is false, or if
-        the file is missing and ``create`` is false.
+        if ``blocking`` is false and the lock is held by someone else or the
+        file cannot be opened, or if the file is missing and ``create`` is
+        false.
+
+    Raises
+    ------
+    PermissionError
+        If ``blocking`` is true and the file cannot be opened; on Windows,
+        after retrying for a moment in case the file is being deleted.
     """
     flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
     if create:
         flags |= os.O_CREAT
+    denied_since: float | None = None
     while True:
         try:
             fd = os.open(path, flags, 0o600)
@@ -321,12 +333,20 @@ def lock_file(path: Path, *, blocking: bool, create: bool = True) -> int | None:
                 raise
             return None
         except PermissionError:
-            # On Windows, a file that is being deleted cannot be opened
-            # until it is gone.
-            if sys.platform != "win32":
-                raise
+            # A file of another user, or one being deleted, is skipped
+            # without waiting.
             if not blocking:
                 return None
+            # On Windows, a file that is being deleted cannot be opened until
+            # it is gone, which takes a moment; a denial that lasts is a real
+            # lack of permission and is raised.
+            if sys.platform != "win32":
+                raise
+            now = time.monotonic()
+            if denied_since is None:
+                denied_since = now
+            if now - denied_since >= _PENDING_DELETE_SECONDS:
+                raise
             time.sleep(_LOCK_RETRY_SECONDS)
             continue
         if blocking:
@@ -343,6 +363,31 @@ def lock_file(path: Path, *, blocking: bool, create: bool = True) -> int | None:
         unlock_file(fd)
         if not create:
             return None
+
+
+def unlock_and_delete(fd: int, path: Path) -> None:
+    """Delete a lock file while it cannot be taken, then release its lock.
+
+    The file is deleted only by the holder of its lock, so a process that
+    holds the lock on the file at ``path``, as ``lock_file`` checks, keeps
+    it until it releases it. On POSIX the file is deleted before the lock is
+    released. On Windows an open file cannot be deleted, so the lock is
+    released first and the deletion fails, leaving the file, if another
+    process opened it in the meantime.
+
+    Parameters
+    ----------
+    fd : int
+        Descriptor returned by ``lock_file`` for ``path``.
+    path : Path
+        The lock file.
+    """
+    if sys.platform == "win32":
+        unlock_file(fd)
+        delete_paths([path])
+        return
+    delete_paths([path])
+    unlock_file(fd)
 
 
 def write_json(path: Path, data: object) -> None:
@@ -415,8 +460,7 @@ class Session:
         try:
             self._save()
         except BaseException:
-            unlock_file(self._fd)
-            delete_paths([self.lock_path])
+            unlock_and_delete(self._fd, self.lock_path)
             raise
 
     def _save(self) -> None:
@@ -481,9 +525,10 @@ class Session:
     def close(self) -> None:
         """Delete the registered files, the session files, and directories.
 
-        Called on normal exit by ``atexit``. Files that cannot be deleted are
-        skipped; a later call on the same root does not collect them, since
-        the session files are gone, unless they are registered again.
+        Called on normal exit by ``atexit``. If a registered file cannot be
+        deleted, for example because it is open, the session files are kept
+        with only the files left, so that a later call on the same root
+        collects them once the lock is released; the directories are kept.
         """
         with self._mutex:
             if self._closed or os.getpid() != self.pid:
@@ -493,11 +538,34 @@ class Session:
         for callback in callbacks:
             with contextlib.suppress(Exception):
                 callback()
-        delete_paths(Path(f) for f in self._files)
+        left = _delete_registered(self._files)
+        if left:
+            self._files = left
+            with contextlib.suppress(OSError):
+                self._save()
+            unlock_file(self._fd)
+            return
         delete_paths([self.json_path])
-        unlock_file(self._fd)
-        delete_paths([self.lock_path])
+        unlock_and_delete(self._fd, self.lock_path)
         delete_paths([], (Path(d) for d in self._directories))
+
+
+def _delete_registered(files: list[str]) -> list[str]:
+    """Delete registered files and tell which are left.
+
+    Parameters
+    ----------
+    files : list[str]
+        Paths of the files.
+
+    Returns
+    -------
+    list[str]
+        Paths of the files that still exist, because they could not be
+        deleted.
+    """
+    delete_paths(Path(f) for f in files)
+    return [f for f in files if os.path.lexists(f)]
 
 
 _sessions: dict[tuple[int, str], Session] = {}
@@ -613,8 +681,10 @@ def collect_stale_sessions(root: Path) -> None:
     """Delete what ended sessions of this user left directly in a root.
 
     For each session lock file in ``root`` that can be locked, the files
-    its JSON file registers and the session files are deleted. Directories
-    are not deleted, and no other root is looked at. Sessions of other
+    its JSON file registers and the session files are deleted; if some
+    files cannot be deleted, the session files are kept with only those
+    files, for a later call. Directories are not deleted, and no other root
+    is looked at. Sessions of other
     users, unreadable JSON files, and files that cannot be deleted are
     skipped.
 
@@ -646,10 +716,17 @@ def collect_stale_sessions(root: Path) -> None:
             unlock_file(fd)
             continue
         files = data.get("files")
-        if isinstance(files, list):
-            delete_paths(
-                Path(f) for f in files if isinstance(f, str) and _is_inside(Path(f), root)
-            )
-        delete_paths([json_path, *root.glob(f"{SESSION_PREFIX}{session_id}.json.*.tmp")])
-        unlock_file(fd)
-        delete_paths([lock_path])
+        registered = [
+            f for f in (files if isinstance(files, list) else [])
+            if isinstance(f, str) and _is_inside(Path(f), root)
+        ]
+        delete_paths(root.glob(f"{SESSION_PREFIX}{session_id}.json.*.tmp"))
+        left = _delete_registered(registered)
+        if left:
+            # Keep what could not be deleted registered for a later call.
+            with contextlib.suppress(OSError):
+                write_json(json_path, {**data, "files": left})
+            unlock_file(fd)
+            continue
+        delete_paths([json_path])
+        unlock_and_delete(fd, lock_path)

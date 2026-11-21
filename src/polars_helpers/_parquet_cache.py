@@ -691,13 +691,15 @@ def _release_leases(session: _disk.Session) -> None:
         _disk.delete_paths([lease])
         if fd is None:
             continue
+        empty = False
         try:
             _clean_generation(session.root, generation, _now())
             empty = _remove_if_empty(entry)
         finally:
-            _disk.unlock_file(fd)
-        if empty:
-            _disk.delete_paths([session.root / f"{entry.name}.lock"])
+            if empty:
+                _disk.unlock_and_delete(fd, session.root / f"{entry.name}.lock")
+            else:
+                _disk.unlock_file(fd)
 
 
 def _clean_generation(root: Path, generation: Path, now: float) -> None:
@@ -774,12 +776,14 @@ def collect_expired(root: Path) -> None:
         fd = _disk.lock_file(lock_path, blocking=False)
         if fd is None:
             continue
+        empty = False
         try:
             if entry.is_dir():
                 for generation in _generations(entry):
                     _clean_generation(root, generation, now)
             empty = _remove_if_empty(entry) if entry.is_dir() or not entry.exists() else False
         finally:
-            _disk.unlock_file(fd)
-        if empty:
-            _disk.delete_paths([lock_path])
+            if empty:
+                _disk.unlock_and_delete(fd, lock_path)
+            else:
+                _disk.unlock_file(fd)

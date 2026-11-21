@@ -4,6 +4,8 @@ import ast
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import helpers
@@ -425,3 +427,103 @@ def test_unusable_default_root_raises(tmp_path: Path, monkeypatch: pytest.Monkey
     with pytest.raises(OSError):
         plh.scan_parquet_relaxed(source)
     assert blocker.read_text() == "x"
+
+
+def test_lock_file_is_deleted_only_while_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delete a lock file before releasing it on POSIX, after on Windows."""
+    path = tmp_path / "x.lock"
+    fd = _disk.lock_file(path, blocking=True)
+    assert fd is not None
+    calls: list[str] = []
+    real_unlock, real_delete = _disk.unlock_file, _disk.delete_paths
+
+    def unlock(fd: int) -> None:
+        calls.append("unlock")
+        real_unlock(fd)
+
+    def delete(files: object, directories: object = ()) -> None:
+        calls.append("delete")
+        real_delete(files, directories)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_disk, "unlock_file", unlock)
+    monkeypatch.setattr(_disk, "delete_paths", delete)
+    _disk.unlock_and_delete(fd, path)
+    expected = ["unlock", "delete"] if sys.platform == "win32" else ["delete", "unlock"]
+    assert calls == expected
+    assert not path.exists()
+
+
+def test_waiter_holds_the_lock_on_the_current_file(tmp_path: Path) -> None:
+    """Leave one holder when the holder deletes the file another waits on."""
+    path = tmp_path / "x.lock"
+    first = _disk.lock_file(path, blocking=True)
+    assert first is not None
+    got: list[int] = []
+    waiter = threading.Thread(target=lambda: got.append(_disk.lock_file(path, blocking=True)))  # type: ignore[arg-type]
+    waiter.start()
+    time.sleep(0.2)
+    _disk.unlock_and_delete(first, path)
+    waiter.join(timeout=30)
+    assert len(got) == 1
+    try:
+        assert os.path.samestat(os.fstat(got[0]), os.stat(path))
+        assert _disk.lock_file(path, blocking=False) is None
+    finally:
+        _disk.unlock_file(got[0])
+
+
+def test_lasting_permission_error_is_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise a lasting PermissionError instead of waiting forever."""
+    monkeypatch.setattr(_disk, "_PENDING_DELETE_SECONDS", 0.2)
+    root = tmp_path / "root"
+    root.mkdir()
+
+    def denied(*args: object, **kwargs: object) -> int:
+        raise PermissionError(13, "denied")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "open", denied)
+        started = time.monotonic()
+        with pytest.raises(PermissionError):
+            _disk.lock_file(root / "x.lock", blocking=True)
+        with pytest.raises(PermissionError):
+            _disk.Session(root)
+        assert time.monotonic() - started < 10
+        assert _disk.lock_file(root / "x.lock", blocking=False) is None
+
+
+def test_files_left_on_exit_are_collected_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the record of files that could not be deleted on exit."""
+    root = tmp_path / "root"
+    root.mkdir()
+    session = _disk.Session(root)
+    busy = root / "busy.bin"
+    done = root / "done.bin"
+    session.register([busy, done])
+    busy.write_text("x")
+    done.write_text("x")
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == busy:
+            raise PermissionError(13, "in use")
+        real_unlink(self, missing_ok=missing_ok)
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "unlink", unlink)
+        session.close()
+        assert not done.exists()
+        assert session.json_path.exists() and session.lock_path.exists()
+        data = json.loads(session.json_path.read_text(encoding="utf-8"))
+        assert data["files"] == [str(busy)]
+        _disk.collect_stale_sessions(root)
+        assert busy.exists() and session.json_path.exists()
+    _disk.collect_stale_sessions(root)
+    assert not busy.exists()
+    assert session_files(root) == []
