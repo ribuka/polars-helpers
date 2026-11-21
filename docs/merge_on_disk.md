@@ -126,6 +126,13 @@ print(out.collect().rows())
   merged rows, so data whose later rows are much larger can go beyond it, and
   the rows one input row gives are always handled together, so a row that
   matches many rows takes the memory of all its matches at once.
+- **Rows.** With `buckets` of 2 or more, each side can have at most
+  `2**32 - 1` rows, because the rows are numbered with `pl.get_index_type()`,
+  which is `UInt32` in the default polars runtime. A larger side fails inside
+  polars, sometimes with a panic that is not a subclass of `Exception`.
+  `buckets=1` has no such limit, as it numbers no rows. With polars installed
+  as `polars[rt64]`, the row numbers are `UInt64` and the limit does not
+  apply.
 - **LazyFrames only.** Pass `df.lazy()` for a `DataFrame`; anything else
   raises a `TypeError`.
 - **Same rules as `merge`.** Null keys never match, duplicate keys multiply

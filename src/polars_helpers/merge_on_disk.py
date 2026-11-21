@@ -496,6 +496,14 @@ def merge_on_disk(
     are always put back in order together, so a row that matches many rows
     takes the memory of all its matches at once.
 
+    With ``buckets >= 2``, each side can have at most ``2**32 - 1`` rows,
+    because the rows are numbered with ``pl.get_index_type()``, which is
+    ``UInt32`` in the default polars runtime. A larger side fails inside
+    polars, sometimes with a panic that is not a subclass of ``Exception``.
+    ``buckets=1`` has no such limit, as it numbers no rows. With polars
+    installed as ``polars[rt64]``, the row numbers are ``UInt64`` and the
+    limit does not apply.
+
     Each call, whatever ``delete_on_exit`` is, also deletes, directly in
     the directory it uses, the files that ended processes registered there
     and left, for example because they were killed, with their session
