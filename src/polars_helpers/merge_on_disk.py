@@ -12,12 +12,11 @@ import polars as pl
 
 from .merge import HOW, _print_summary, _resolve_keys, merge
 
-# Temporary row numbers of each side; named so they do not clash with the
-# columns of the frames being merged.
+# Base names of the temporary row numbers of each side and of the partition
+# key holding the bucket of each row; ``_temporary_names`` adds a suffix when
+# a base name is taken by a column of the merge.
 _LEFT_ROW = "__polars_helpers_left_row"
 _RIGHT_ROW = "__polars_helpers_right_row"
-
-# Name of the partition key that holds the bucket of each row.
 _BUCKET = "__polars_helpers_bucket"
 
 # Fixed seed of the key hash, so both sides put equal keys in one bucket.
@@ -31,7 +30,36 @@ _RESTORE_ROWS = 10_000_000
 _ROW_GROUP_ROWS = 1_000_000
 
 
-def _bucket_expr(keys: list[str], dtypes: list[pl.DataType], buckets: int) -> pl.Expr:
+def _temporary_names(taken: set[str], bases: list[str]) -> list[str]:
+    """Choose temporary column names that no column of the merge uses.
+
+    Parameters
+    ----------
+    taken : set[str]
+        Names to avoid: the columns of both sides, the names a join may give
+        them with the ``"_right"`` suffix, and the indicator.
+    bases : list[str]
+        Preferred names, one per temporary column.
+
+    Returns
+    -------
+    list[str]
+        One name per base, distinct from ``taken`` and from each other.
+    """
+    names: list[str] = []
+    avoid = set(taken)
+    for base in bases:
+        name, n = base, 0
+        while name in avoid:
+            name, n = f"{base}_{n}", n + 1
+        avoid.add(name)
+        names.append(name)
+    return names
+
+
+def _bucket_expr(
+    keys: list[str], dtypes: list[pl.DataType], buckets: int, name: str
+) -> pl.Expr:
     """Build the bucket of each row from the hash of its keys.
 
     Parameters
@@ -43,6 +71,8 @@ def _bucket_expr(keys: list[str], dtypes: list[pl.DataType], buckets: int) -> pl
         both sides hash alike.
     buckets : int
         Number of buckets.
+    name : str
+        Name of the bucket column.
 
     Returns
     -------
@@ -54,7 +84,7 @@ def _bucket_expr(keys: list[str], dtypes: list[pl.DataType], buckets: int) -> pl
         pl.col(key).cast(dtype, strict=False).alias(str(i))
         for i, (key, dtype) in enumerate(zip(keys, dtypes, strict=True))
     ]
-    return (pl.struct(fields).hash(seed=_HASH_SEED) % buckets).alias(_BUCKET)
+    return (pl.struct(fields).hash(seed=_HASH_SEED) % buckets).alias(name)
 
 
 def _common_key_dtypes(
@@ -197,7 +227,7 @@ def _row_count(files: list[Path]) -> int:
 
 
 def _restore_ranges(
-    how: HOW, left_rows: int, right_rows: int
+    how: HOW, left_rows: int, right_rows: int, left_row: str, right_row: str
 ) -> list[tuple[pl.Expr, list[str]]]:
     """List the ranges of row numbers to put the merged rows back in order.
 
@@ -207,6 +237,8 @@ def _restore_ranges(
         Join strategy of the merge.
     left_rows, right_rows : int
         Row counts of each side.
+    left_row, right_row : str
+        Names of the temporary row-number columns of each side.
 
     Returns
     -------
@@ -214,8 +246,6 @@ def _restore_ranges(
         For each range, in the order of the result, the filter that selects
         its merged rows and the row-number columns to sort them by.
     """
-    left_row, right_row = pl.col(_LEFT_ROW), pl.col(_RIGHT_ROW)
-
     def ranges(rows: int, column: pl.Expr) -> list[pl.Expr]:
         return [
             (column >= start) & (column < start + _RESTORE_ROWS)
@@ -223,12 +253,14 @@ def _restore_ranges(
         ]
 
     if how == "right":
-        return [(cond, [_RIGHT_ROW, _LEFT_ROW]) for cond in ranges(right_rows, right_row)]
-    out = [(cond, [_LEFT_ROW, _RIGHT_ROW]) for cond in ranges(left_rows, left_row)]
+        return [
+            (cond, [right_row, left_row]) for cond in ranges(right_rows, pl.col(right_row))
+        ]
+    out = [(cond, [left_row, right_row]) for cond in ranges(left_rows, pl.col(left_row))]
     if how == "full":
         out += [
-            (left_row.is_null() & cond, [_RIGHT_ROW])
-            for cond in ranges(right_rows, right_row)
+            (pl.col(left_row).is_null() & cond, [right_row])
+            for cond in ranges(right_rows, pl.col(right_row))
         ]
     return out
 
@@ -269,13 +301,15 @@ def _make_directory(directory: str | Path | None) -> tuple[Path, list[Path]]:
     Returns
     -------
     tuple[Path, list[Path]]
-        The directory, and the directories this call created, the innermost
+        The absolute path of the directory, so that the result and its
+        deletion on exit do not depend on a later change of the working
+        directory, and the directories this call created, the innermost
         first.
     """
     if directory is None:
-        path = Path(tempfile.mkdtemp(prefix="polars_helpers_merge_"))
+        path = Path(tempfile.mkdtemp(prefix="polars_helpers_merge_")).absolute()
         return path, [path]
-    path = Path(directory)
+    path = Path(directory).absolute()
     created: list[Path] = []
     ancestor = path
     while not ancestor.exists():
@@ -431,14 +465,22 @@ def merge_on_disk(
         if buckets == 1:
             join(left, right).sink_parquet(result_file(), engine="streaming")
         else:
-            left_numbered = left.with_row_index(_LEFT_ROW)
-            right_numbered = right.with_row_index(_RIGHT_ROW)
+            left_columns, right_columns = left.collect_schema(), right.collect_schema()
+            taken = {*left_columns, *right_columns}
+            taken |= {f"{c}_right" for c in taken}
+            if indicator is not None:
+                taken.add(indicator)
+            left_row, right_row, bucket_name = _temporary_names(
+                taken, [_LEFT_ROW, _RIGHT_ROW, _BUCKET]
+            )
+            left_numbered = left.with_row_index(left_row)
+            right_numbered = right.with_row_index(right_row)
 
             left_files = _partition(
-                left_numbered, _bucket_expr(left_keys, dtypes, buckets), work / "left"
+                left_numbered, _bucket_expr(left_keys, dtypes, buckets, bucket_name), work / "left"
             )
             right_files = _partition(
-                right_numbered, _bucket_expr(right_keys, dtypes, buckets), work / "right"
+                right_numbered, _bucket_expr(right_keys, dtypes, buckets, bucket_name), work / "right"
             )
 
             left_schema = left_numbered.collect_schema()
@@ -460,11 +502,13 @@ def merge_on_disk(
                 merged = pl.scan_parquet(merged_files)
                 left_rows = _row_count([f for fs in left_files.values() for f in fs])
                 right_rows = _row_count([f for fs in right_files.values() for f in fs])
-                for cond, by in _restore_ranges(how, left_rows, right_rows):
+                for cond, by in _restore_ranges(
+                    how, left_rows, right_rows, left_row, right_row
+                ):
                     # Sorting the collected range uses less memory than
                     # sorting in the query; the range is freed before the
                     # next one is collected.
-                    part = merged.filter(cond).collect().sort(by).drop(_LEFT_ROW, _RIGHT_ROW)
+                    part = merged.filter(cond).collect().sort(by).drop(left_row, right_row)
                     if part.height:
                         part.write_parquet(result_file())
                     del part

@@ -374,3 +374,67 @@ def test_merge_on_disk_verbose_matches_merge(
     )
     assert capsys.readouterr().out == expected
     assert expected
+
+
+@pytest.mark.parametrize("how", HOWS)
+@pytest.mark.parametrize(
+    ("left_extra", "right_extra", "indicator"),
+    [
+        ("__polars_helpers_bucket", None, "_merge"),
+        ("__polars_helpers_left_row", None, "_merge"),
+        ("__polars_helpers_right_row", None, "_merge"),
+        (None, "__polars_helpers_left_row", "_merge"),
+        ("x", "x", "__polars_helpers_left_row"),
+        ("__polars_helpers_left_row", "__polars_helpers_left_row", "__polars_helpers_right_row"),
+    ],
+    ids=["bucket", "left_row", "right_row_in_left", "left_row_in_right", "indicator", "suffix"],
+)
+def test_merge_on_disk_with_columns_named_like_temporary_ones(
+    tmp_path: Path,
+    how: plh.HOW,
+    left_extra: str | None,
+    right_extra: str | None,
+    indicator: str,
+) -> None:
+    """Keep input columns and indicators named like the temporary columns."""
+    left = pl.LazyFrame({"k": [1, 2, 2, 3, None], "a": [1, 2, 3, 4, 5]})
+    right = pl.LazyFrame({"k": [2, 3, 4, None], "b": [20, 30, 40, 50]})
+    if left_extra is not None:
+        left = left.with_columns(pl.int_range(pl.len()).alias(left_extra) * 10)
+    if right_extra is not None:
+        right = right.with_columns(pl.int_range(pl.len()).alias(right_extra) * 100)
+    expected = plh.merge(left, right, on="k", how=how, indicator=indicator).collect()
+    got = plh.merge_on_disk(
+        left, right, on="k", how=how, indicator=indicator, directory=tmp_path, buckets=4
+    ).collect()
+    assert got.equals(expected)
+
+
+def test_merge_on_disk_keeps_relative_directory_after_chdir(tmp_path: Path) -> None:
+    """Read and delete the result of a relative ``directory`` after ``chdir``."""
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    code = textwrap.dedent(
+        f"""
+        import os
+
+        import polars as pl
+
+        import polars_helpers as plh
+
+        os.chdir({str(first)!r})
+        frame = pl.LazyFrame({{"k": [1, 2, 3], "a": [1, 2, 3]}})
+        for buckets in (1, 2):
+            out = plh.merge_on_disk(
+                frame, frame, on="k", directory="out", delete_on_exit=True, buckets=buckets
+            )
+            os.chdir({str(second)!r})
+            assert out.collect().equals(plh.merge(frame, frame, on="k").collect())
+            os.chdir({str(first)!r})
+        os.chdir({str(second)!r})
+        """
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+    assert list(first.iterdir()) == []
+    assert list(second.iterdir()) == []
