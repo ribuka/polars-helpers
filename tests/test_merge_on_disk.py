@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import importlib
 import itertools
+import json
+import os
 import random
+import re
 import subprocess
 import sys
 import textwrap
@@ -12,12 +15,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import helpers
 import polars as pl
 import pytest
 
 import polars_helpers as plh
+from polars_helpers import _disk
 
 merge_on_disk_module = importlib.import_module("polars_helpers.merge_on_disk")
+
+# Name of a result file of ``merge_on_disk``.
+_RESULT = re.compile(r"merge-[0-9a-f]{32}-\d{5}\.parquet")
 
 HOWS: list[plh.HOW] = ["left", "inner", "right", "full"]
 
@@ -247,14 +255,45 @@ def test_merge_on_disk_rejects_before_writing(
     assert not directory.exists() or not any(directory.iterdir())
 
 
-def test_merge_on_disk_rejects_file_as_directory(tmp_path: Path) -> None:
-    """Raise ``NotADirectoryError`` for a file passed as ``directory``."""
+@pytest.mark.parametrize(
+    ("directory", "error", "match"),
+    [
+        (1, TypeError, "directory must be a str, Path, or None"),
+        ("", ValueError, "directory must not be an empty string"),
+        ("file", NotADirectoryError, "directory is not a directory"),
+    ],
+    ids=["type", "empty", "file"],
+)
+def test_merge_on_disk_rejects_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_cache: Path,
+    directory: object,
+    error: type[BaseException],
+    match: str,
+) -> None:
+    """Reject a bad ``directory`` before writing anything anywhere."""
     file = tmp_path / "file"
     file.write_text("keep")
-    with pytest.raises(NotADirectoryError):
-        plh.merge_on_disk(_FRAME, _FRAME, on="k", directory=file)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(error, match=match):
+        plh.merge_on_disk(_FRAME, _FRAME, on="k", directory=directory)  # type: ignore[arg-type]
     assert file.read_text() == "keep"
     assert list(tmp_path.iterdir()) == [file]
+    assert list(isolated_cache.iterdir()) == []
+
+
+def test_merge_on_disk_creates_relative_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_cache: Path
+) -> None:
+    """Create a missing relative ``directory`` under the working directory."""
+    monkeypatch.chdir(tmp_path)
+    out = plh.merge_on_disk(_FRAME, _FRAME, on="k", directory=Path("a") / "b", buckets=2)
+    assert out.collect().equals(plh.merge(_FRAME, _FRAME, on="k").collect())
+    assert [p.name for p in tmp_path.iterdir()] == ["a"]
+    written = [p.name for p in (tmp_path / "a" / "b").iterdir()]
+    assert len(written) == 1 and _RESULT.fullmatch(written[0])
+    assert list(isolated_cache.iterdir()) == []
 
 
 def test_merge_on_disk_leaves_other_files_alone(tmp_path: Path) -> None:
@@ -275,72 +314,247 @@ def test_merge_on_disk_leaves_other_files_alone(tmp_path: Path) -> None:
     assert not list(tmp_path.glob("*-work"))
 
 
-def _run_child(tmp_path: Path, arguments: str, temp_dir: bool) -> None:
-    """Call ``merge_on_disk`` in a child process that then exits normally.
+_WIN_HOME = ("home", "AppData", "Local", "polars-helpers", "cache")
+_POSIX_HOME = ("home", ".cache", "polars-helpers")
+
+
+@pytest.mark.parametrize(
+    ("platform", "variable", "value", "expected"),
+    [
+        ("win32", "LOCALAPPDATA", "local", ("local", "polars-helpers", "cache")),
+        ("win32", "LOCALAPPDATA", None, _WIN_HOME),
+        ("win32", "LOCALAPPDATA", "", _WIN_HOME),
+        ("win32", "LOCALAPPDATA", "relative", _WIN_HOME),
+        ("darwin", "XDG_CACHE_HOME", "xdg", ("home", "Library", "Caches", "polars-helpers")),
+        ("linux", "XDG_CACHE_HOME", "xdg", ("xdg", "polars-helpers")),
+        ("linux", "XDG_CACHE_HOME", None, _POSIX_HOME),
+        ("linux", "XDG_CACHE_HOME", "", _POSIX_HOME),
+        ("linux", "XDG_CACHE_HOME", "relative", _POSIX_HOME),
+    ],
+    ids=[
+        "win-set", "win-unset", "win-empty", "win-relative", "mac",
+        "posix-set", "posix-unset", "posix-empty", "posix-relative",
+    ],
+)
+def test_merge_on_disk_writes_in_default_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    variable: str,
+    value: str | None,
+    expected: tuple[str, ...],
+) -> None:
+    """Write directly in the default root of ``_disk``, never in ``tempfile``.
+
+    ``sys.platform`` itself is not patched, since the locks depend on it;
+    the default root is found for ``platform`` from the patched environment.
+    """
+    assert not hasattr(merge_on_disk_module, "tempfile")
+    monkeypatch.chdir(tmp_path)
+    if value is None:
+        monkeypatch.delenv(variable, raising=False)
+    else:
+        monkeypatch.setenv(variable, str(tmp_path / value) if value in {"local", "xdg"} else value)
+    monkeypatch.setattr(
+        _disk,
+        "default_root",
+        lambda: _disk._default_root_for(platform, os.environ, lambda: tmp_path / "home"),
+    )
+    out = plh.merge_on_disk(_FRAME, _FRAME, on="k", buckets=2, delete_on_exit=False)
+    assert out.collect().equals(plh.merge(_FRAME, _FRAME, on="k").collect())
+    written = [p.name for p in tmp_path.joinpath(*expected).iterdir()]
+    assert len(written) == 1 and _RESULT.fullmatch(written[0])
+    assert [p.name for p in tmp_path.iterdir()] == [expected[0]]
+
+
+def _child_env(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    """Build the environment of a child whose default root is in ``tmp_path``.
 
     Parameters
     ----------
     tmp_path : Path
         Directory of the test.
+
+    Returns
+    -------
+    tuple[dict[str, str], Path]
+        Environment, with ``LOCALAPPDATA`` for Windows and ``HOME`` and
+        ``XDG_CACHE_HOME`` for POSIX under ``tmp_path / "home"``, and the
+        default root the child sees with it.
+    """
+    home = tmp_path / "home"
+    env = {
+        **os.environ,
+        "LOCALAPPDATA": str(home / "AppData" / "Local"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+    }
+    if sys.platform == "win32":
+        root = home / "AppData" / "Local" / "polars-helpers" / "cache"
+    elif sys.platform == "darwin":
+        root = home / "Library" / "Caches" / "polars-helpers"
+    else:
+        root = home / ".cache" / "polars-helpers"
+    return env, root
+
+
+def _run_child(tmp_path: Path, arguments: str) -> Path:
+    """Call ``merge_on_disk`` in a child process that then exits normally.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Directory of the test; the child sees its default root under it.
     arguments : str
         Keyword arguments for ``directory`` and ``delete_on_exit``.
-    temp_dir : bool
-        Whether to point ``tempfile.tempdir`` of the child at ``tmp_path``.
+
+    Returns
+    -------
+    Path
+        Default root of the child.
     """
+    env, root = _child_env(tmp_path)
     code = textwrap.dedent(
         f"""
-        import tempfile
-        from pathlib import Path
-
         import polars as pl
 
         import polars_helpers as plh
 
-        if {temp_dir!r}:
-            tempfile.tempdir = {str(tmp_path)!r}
         frame = pl.LazyFrame({{"k": [1, 2, 3], "a": [1, 2, 3]}})
         plh.merge_on_disk(frame, frame, on="k", buckets=2, {arguments}).collect()
         """
     )
-    subprocess.run([sys.executable, "-c", code], check=True)
+    subprocess.run([sys.executable, "-c", code], check=True, env=env)
+    return root
 
 
 def test_merge_on_disk_keeps_given_directory_by_default(tmp_path: Path) -> None:
-    """Keep the result files in a given directory after the process exits."""
-    (tmp_path / "keep.txt").write_text("keep")
-    _run_child(tmp_path, f"directory={str(tmp_path)!r}", temp_dir=False)
-    assert list(tmp_path.glob("merge-*-00000.parquet"))
-    assert (tmp_path / "keep.txt").exists()
+    """Keep only the result files in a given directory after the process exits."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "keep.txt").write_text("keep")
+    _run_child(tmp_path, f"directory={str(out)!r}")
+    names = sorted(p.name for p in out.iterdir())
+    assert len(names) == 2 and names[0] == "keep.txt" and _RESULT.fullmatch(names[1])
 
 
-def test_merge_on_disk_deletes_from_given_directory(tmp_path: Path) -> None:
-    """Delete only this call's files from a given directory on exit."""
-    (tmp_path / "keep.txt").write_text("keep")
-    _run_child(tmp_path, f"directory={str(tmp_path)!r}, delete_on_exit=True", temp_dir=False)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["keep.txt"]
+@pytest.mark.parametrize("created", [False, True], ids=["existing", "created"])
+def test_merge_on_disk_deletes_from_given_directory(tmp_path: Path, created: bool) -> None:
+    """Delete this call's files, session files, and created directories on exit."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "keep.txt").write_text("keep")
+    directory = out / "new" / "sub" if created else out
+    _run_child(tmp_path, f"directory={str(directory)!r}, delete_on_exit=True")
+    assert sorted(p.name for p in out.iterdir()) == ["keep.txt"]
 
 
-def test_merge_on_disk_deletes_temporary_directory_by_default(tmp_path: Path) -> None:
-    """Delete the directory it created when ``directory`` is ``None``."""
-    (tmp_path / "keep.txt").write_text("keep")
-    _run_child(tmp_path, "directory=None", temp_dir=True)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["keep.txt"]
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+def test_merge_on_disk_deletes_from_default_root(tmp_path: Path, existing: bool) -> None:
+    """Delete this call's files and session files but keep the default root."""
+    _, root = _child_env(tmp_path)
+    if existing:
+        root.mkdir(parents=True)
+        (root / "keep.txt").write_text("keep")
+    _run_child(tmp_path, "directory=None")
+    assert root.is_dir()
+    assert sorted(p.name for p in root.iterdir()) == (["keep.txt"] if existing else [])
 
 
-def test_merge_on_disk_keeps_temporary_directory(tmp_path: Path) -> None:
-    """Keep the created directory with ``delete_on_exit=False``."""
-    (tmp_path / "keep.txt").write_text("keep")
-    _run_child(tmp_path, "directory=None, delete_on_exit=False", temp_dir=True)
-    created = list(tmp_path.glob("polars_helpers_merge_*"))
-    assert len(created) == 1
-    assert list(created[0].glob("merge-*-00000.parquet"))
-    assert (tmp_path / "keep.txt").exists()
+def test_merge_on_disk_keeps_result_in_default_root(tmp_path: Path) -> None:
+    """Keep only the result files in the default root with ``delete_on_exit=False``."""
+    root = _run_child(tmp_path, "directory=None, delete_on_exit=False")
+    names = [p.name for p in root.iterdir()]
+    assert len(names) == 1 and _RESULT.fullmatch(names[0])
 
 
-def test_merge_on_disk_cleans_up_after_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+# Child that calls ``merge_on_disk`` in ``sys.argv[1]``, the default root if
+# ``sys.argv[3]`` is ``"1"``, with and without ``delete_on_exit``, and in
+# ``sys.argv[2]`` with it, then prints the names each call added.
+_MERGING_CHILD = """
+import json
+from pathlib import Path
+
+import polars as pl
+
+import polars_helpers as plh
+
+root, other = Path(sys.argv[1]), Path(sys.argv[2])
+directory = None if sys.argv[3] == "1" else root
+frame = pl.LazyFrame({"k": [1, 2, 3], "a": [1, 2, 3]})
+names = {}
+for name, where, delete in (("delete", root, True), ("keep", root, False), ("other", other, True)):
+    before = set(os.listdir(where))
+    plh.merge_on_disk(
+        frame, frame, on="k", buckets=2, delete_on_exit=delete,
+        directory=directory if where == root else where,
+    ).collect()
+    names[name] = sorted(set(os.listdir(where)) - before)
+print(json.dumps(names), flush=True)
+wait_for_parent()
+"""
+
+
+@pytest.mark.parametrize("use_default", [False, True], ids=["directory", "default"])
+@pytest.mark.parametrize("collector", ["merge_delete", "merge_keep", "scan_parquet_relaxed"])
+def test_merge_on_disk_collects_killed_process(
+    tmp_path: Path, isolated_cache: Path, use_default: bool, collector: str
 ) -> None:
-    """Delete the files it wrote when the merge fails midway."""
+    """Collect what a killed process registered on the next call on its root."""
+    root = _disk.default_root() if use_default else tmp_path / "root"
+    assert root.is_relative_to(isolated_cache if use_default else tmp_path)
+    other = tmp_path / "other"
+    root.mkdir(parents=True)
+    other.mkdir()
+    (root / "keep.txt").write_text("keep")
+    pl.DataFrame({"z": [9]}).write_parquet(root / "merge-unregistered-00000.parquet")
+    arguments = (str(root), str(other), "1" if use_default else "0")
+
+    alive = helpers.start(_MERGING_CHILD, *arguments)
+    try:
+        alive_names = json.loads(helpers.ready(alive))
+        killed = helpers.start(_MERGING_CHILD, *arguments)
+        killed_names = json.loads(helpers.ready(killed))
+        helpers.kill(killed)
+        assert len(killed_names["delete"]) == 3
+        assert any(n.startswith(_disk.SESSION_PREFIX) for n in killed_names["delete"])
+        assert len(killed_names["keep"]) == 1 and _RESULT.fullmatch(killed_names["keep"][0])
+
+        directory = None if use_default else root
+        if collector == "scan_parquet_relaxed":
+            source = tmp_path / "source.parquet"
+            pl.DataFrame({"x": [1]}).write_parquet(source)
+            plh.scan_parquet_relaxed(source, directory=directory).collect()
+        else:
+            plh.merge_on_disk(
+                _FRAME, _FRAME, on="k", directory=directory,
+                delete_on_exit=collector == "merge_delete",
+            ).collect()
+
+        names = {p.name for p in root.iterdir()}
+        assert not names & set(killed_names["delete"])
+        assert set(killed_names["keep"]) <= names
+        assert {*alive_names["delete"], *alive_names["keep"]} <= names
+        assert {"keep.txt", "merge-unregistered-00000.parquet"} <= names
+        assert {*killed_names["other"], *alive_names["other"]} <= {p.name for p in other.iterdir()}
+    finally:
+        helpers.finish(alive)
+    names = {p.name for p in root.iterdir()}
+    assert not names & set(alive_names["delete"])
+    assert set(alive_names["keep"]) <= names
+
+
+@pytest.mark.parametrize("delete_on_exit", [None, True, False])
+@pytest.mark.parametrize("use_default", [False, True], ids=["directory", "default"])
+def test_merge_on_disk_cleans_up_after_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_cache: Path,
+    delete_on_exit: bool | None,
+    use_default: bool,
+) -> None:
+    """Delete the files and directories it wrote when the merge fails midway."""
     calls = 0
     real_merge = merge_on_disk_module.merge
 
@@ -353,10 +567,17 @@ def test_merge_on_disk_cleans_up_after_failure(
 
     monkeypatch.setattr(merge_on_disk_module, "merge", failing_merge)
     left, right, keys = _frames("int", True, False, seed=3)
+    (tmp_path / "keep.txt").write_text("keep")
+    directory = None if use_default else tmp_path / "out" / "sub"
     with pytest.raises(RuntimeError, match="boom"):
-        plh.merge_on_disk(left, right, **keys, directory=tmp_path, buckets=4)
+        plh.merge_on_disk(
+            left, right, **keys, directory=directory, delete_on_exit=delete_on_exit, buckets=4
+        )
     assert calls == 2
-    assert not list(tmp_path.glob("merge-*"))
+    assert [p.name for p in tmp_path.iterdir()] == ["keep.txt"]
+    assert list(isolated_cache.iterdir()) == []
+    root = _disk.default_root() if use_default else tmp_path / "out" / "sub"
+    assert _disk.current_session_id(root) is None
 
 
 @pytest.mark.parametrize("indicator", ["_merge", None])

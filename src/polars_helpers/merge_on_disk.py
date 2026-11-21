@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import atexit
 import shutil
-import tempfile
 import uuid
 from pathlib import Path
 
 import polars as pl
 
+from . import _disk
 from .merge import HOW, _print_summary, _resolve_keys, merge
 
 # Base names of the temporary row numbers of each side and of the partition
@@ -265,60 +264,6 @@ def _restore_ranges(
     return out
 
 
-def _delete(files: list[Path], directories: list[Path]) -> None:
-    """Delete files, then the directories that are left empty.
-
-    Files and directories that cannot be deleted, for example because they
-    are open, are skipped without raising.
-
-    Parameters
-    ----------
-    files : list[Path]
-        Files to delete.
-    directories : list[Path]
-        Directories to delete if empty, the innermost first.
-    """
-    for file in files:
-        try:
-            file.unlink(missing_ok=True)
-        except OSError:
-            pass
-    for directory in directories:
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
-
-
-def _make_directory(directory: str | Path | None) -> tuple[Path, list[Path]]:
-    """Create the directory to write the result in.
-
-    Parameters
-    ----------
-    directory : str | Path | None
-        Directory given by the caller, or ``None`` for a new temporary one.
-
-    Returns
-    -------
-    tuple[Path, list[Path]]
-        The absolute path of the directory, so that the result and its
-        deletion on exit do not depend on a later change of the working
-        directory, and the directories this call created, the innermost
-        first.
-    """
-    if directory is None:
-        path = Path(tempfile.mkdtemp(prefix="polars_helpers_merge_")).absolute()
-        return path, [path]
-    path = Path(directory).absolute()
-    created: list[Path] = []
-    ancestor = path
-    while not ancestor.exists():
-        created.append(ancestor)
-        ancestor = ancestor.parent
-    path.mkdir(parents=True, exist_ok=True)
-    return path, created
-
-
 def merge_on_disk(
     left: pl.LazyFrame,
     right: pl.LazyFrame,
@@ -376,19 +321,35 @@ def merge_on_disk(
         ``merge`` does, counted from the written result.
     directory : str | Path | None, default None
         Directory to write the result in; it is created with its parents if
-        missing. Files already in it are neither read, overwritten, nor
-        deleted: each call writes ``merge-<id>-00000.parquet``,
-        ``merge-<id>-00001.parquet``, ... with an ``<id>`` of its own, and
-        works in ``merge-<id>-work/``, which is deleted before returning.
-        If ``None``, a new directory is created under the temporary
-        directory of the OS with ``tempfile.mkdtemp``.
+        missing. A relative path is taken from the current working directory
+        at the call; ``~`` and environment variables are not expanded. Files
+        already in it are neither read, overwritten, nor deleted: each call
+        writes ``merge-<id>-00000.parquet``, ``merge-<id>-00001.parquet``,
+        ... with an ``<id>`` of its own, and works in ``merge-<id>-work/``,
+        which is deleted before returning. If ``None``, the same names are
+        written directly in the user cache directory of the OS, the default
+        directory of ``scan_parquet_relaxed``: ``%LOCALAPPDATA%`` (or
+        ``~/AppData/Local``) ``/polars-helpers/cache`` on Windows,
+        ``~/Library/Caches/polars-helpers`` on macOS, and
+        ``$XDG_CACHE_HOME`` (or ``~/.cache``) ``/polars-helpers`` elsewhere.
+        The temporary directory of the OS is never used; if the directory
+        cannot be written, the error is raised and no other directory is
+        tried.
     delete_on_exit : bool | None, default None
         Whether to delete the result files of this call when the process
-        exits normally (``atexit``), together with the directories this call
-        created once they are empty. ``None`` deletes them when
-        ``directory`` is ``None`` and keeps them when it is given. Files
-        that cannot be deleted, for example because they are open, are
-        skipped. Nothing is deleted when the process is killed.
+        exits normally (``atexit``). ``None`` deletes them when
+        ``directory`` is ``None`` and keeps them when it is given. Once the
+        result is written, the files to delete are registered in a session
+        of the process, kept as ``.polars-helpers-session-<id>.lock`` and
+        ``.json`` directly in the directory and deleted with them; with a
+        given ``directory``, the directories this call created are deleted
+        too, the innermost first, once they are empty. The default
+        directory and directories that existed before the call are kept.
+        Files that cannot be deleted, for example because they are open,
+        are skipped. If the process is killed, a later call of
+        ``merge_on_disk`` or ``scan_parquet_relaxed`` on the same directory
+        deletes the registered files and the session files. With ``False``,
+        only the result files are written, and nothing deletes them.
     buckets : int, default 16
         Number of buckets to split both sides into. ``buckets=1`` is faster
         and uses less memory when ``right`` is small; keep the default when
@@ -407,20 +368,31 @@ def merge_on_disk(
     Raises
     ------
     TypeError
-        If ``left`` and ``right`` are not both ``pl.LazyFrame``.
+        If ``left`` and ``right`` are not both ``pl.LazyFrame``, or if
+        ``directory`` is not a ``str``, ``Path``, or ``None``.
     ValueError
         If ``buckets`` is not a positive integer, if the keys are not given
-        as either ``on`` or both ``left_on`` and ``right_on``, or if
-        ``indicator`` names an existing column.
+        as either ``on`` or both ``left_on`` and ``right_on``, if
+        ``indicator`` names an existing column, or if ``directory`` is an
+        empty string.
     NotADirectoryError
         If ``directory`` is an existing file.
+    OSError
+        If the directory cannot be created or written.
 
     Notes
     -----
     Key types that cannot be joined raise the same exception as collecting
     ``merge`` of the empty frames. Every check is done before anything is
     written. If the merge fails midway, the files and directories this call
-    wrote are deleted before the exception is raised.
+    wrote are deleted before the exception is raised, and no session is
+    created.
+
+    Each call, whatever ``delete_on_exit`` is, also deletes, directly in
+    the directory it uses, the files that ended processes registered there
+    and left, for example because they were killed, with their session
+    files. Files of living processes, unregistered files, directories, and
+    other directories are left alone.
     """
     if not isinstance(left, pl.LazyFrame) or not isinstance(right, pl.LazyFrame):
         raise TypeError(
@@ -433,10 +405,9 @@ def merge_on_disk(
         left.clear(), right.clear(), columns, on, left_on, right_on, how, indicator
     ).collect()
 
-    if directory is not None and Path(directory).exists() and not Path(directory).is_dir():
-        raise NotADirectoryError(f"directory is not a directory: {directory}")
-
-    path, created = _make_directory(directory)
+    path = _disk.resolve_root(directory)
+    created = _disk.make_directory(path)
+    _disk.collect_stale_sessions(path)
     call_id = uuid.uuid4().hex
     work = path / f"merge-{call_id}-work"
     results: list[Path] = []
@@ -517,15 +488,20 @@ def merge_on_disk(
 
         if not results:
             empty.write_parquet(result_file())
+
+        # Registered only once every result file is written, so that a call
+        # that fails creates no session.
+        if delete_on_exit is None:
+            delete_on_exit = directory is None
+        if delete_on_exit:
+            session = _disk.get_session(path)
+            session.register(results)
+            if directory is not None:
+                session.register_directories(created)
     except BaseException:
         shutil.rmtree(work, ignore_errors=True)
-        _delete(results, created)
+        _disk.delete_paths(results, created)
         raise
-
-    if delete_on_exit is None:
-        delete_on_exit = directory is None
-    if delete_on_exit:
-        atexit.register(_delete, list(results), created)
 
     out = pl.scan_parquet(results)
     if verbose:
