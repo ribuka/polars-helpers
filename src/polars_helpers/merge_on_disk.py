@@ -21,8 +21,20 @@ _BUCKET = "__polars_helpers_bucket"
 # Fixed seed of the key hash, so both sides put equal keys in one bucket.
 _HASH_SEED = 0
 
-# Number of row numbers whose rows are put back in order at a time.
+# Target ``estimated_size()`` of the merged rows put back in order at a time;
+# sorting them makes the peak about twice as large.
+_RESTORE_BYTES = 1 << 30
+
+# Most merged rows put back in order at a time, however narrow they are.
 _RESTORE_ROWS = 10_000_000
+
+# Merged rows read from the start to measure the size of one row.
+_SAMPLE_ROWS = 10_000
+
+# Width of the intervals of row numbers whose merged rows are counted first;
+# an interval holding more rows than fit at a time is counted again row by
+# row number.
+_COUNT_BLOCK = 100_000
 
 # Rows per row group of the merged buckets, so that putting one range of
 # row numbers back in order reads only the row groups of that range.
@@ -207,37 +219,129 @@ def _scan(files: list[Path], schema: pl.Schema) -> pl.LazyFrame:
     return pl.scan_parquet(files)
 
 
-def _row_count(files: list[Path]) -> int:
-    """Count the rows of Parquet files from their metadata.
+def _restore_limit(merged: pl.LazyFrame) -> int:
+    """Choose how many merged rows to put back in order at a time.
 
     Parameters
     ----------
-    files : list[Path]
-        Files to count.
+    merged : pl.LazyFrame
+        Merged rows of every bucket, with the row-number columns.
 
     Returns
     -------
     int
-        Total number of rows; ``0`` if there are no files.
+        ``_RESTORE_BYTES`` divided by the size of one row, measured with
+        ``estimated_size()`` on the first ``_SAMPLE_ROWS`` rows; at most
+        ``_RESTORE_ROWS`` and at least ``1``. ``_RESTORE_ROWS`` if there are
+        no rows.
     """
-    if not files:
-        return 0
-    return pl.scan_parquet(files).select(pl.len()).collect().item()
+    sample = merged.head(_SAMPLE_ROWS).collect()
+    if sample.height == 0:
+        return _RESTORE_ROWS
+    width = sample.estimated_size() / sample.height
+    if width <= 0:
+        return _RESTORE_ROWS
+    return max(1, min(_RESTORE_ROWS, int(_RESTORE_BYTES // width)))
+
+
+def _split_ranges(units: list[tuple[int, int, int]], limit: int) -> list[tuple[int, int]]:
+    """Group consecutive units of row numbers into ranges of at most ``limit`` rows.
+
+    Parameters
+    ----------
+    units : list[tuple[int, int, int]]
+        ``(start, end, rows)`` of each unit, in ascending order of row
+        numbers: the row numbers from ``start`` up to ``end`` (excluded) hold
+        ``rows`` merged rows.
+    limit : int
+        Most merged rows of one range.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        ``(start, end)`` of each range, in ascending order. Neighboring
+        units are grouped while their rows total at most ``limit``; a unit
+        holding more than ``limit`` rows is a range of its own.
+    """
+    ranges: list[tuple[int, int]] = []
+    current: tuple[int, int] | None = None
+    total = 0
+    for start, end, rows in units:
+        if current is not None and total + rows <= limit:
+            current, total = (current[0], end), total + rows
+            continue
+        if current is not None:
+            ranges.append(current)
+        current, total = (start, end), rows
+    if current is not None:
+        ranges.append(current)
+    return ranges
+
+
+def _count_units(
+    merged: pl.LazyFrame, part: pl.Expr, column: str, limit: int
+) -> list[tuple[int, int, int]]:
+    """Count the merged rows of one part by intervals of row numbers.
+
+    Parameters
+    ----------
+    merged : pl.LazyFrame
+        Merged rows of every bucket, with the row-number columns.
+    part : pl.Expr
+        Filter that selects the rows of the part.
+    column : str
+        Row-number column that orders the part.
+    limit : int
+        Most merged rows put back in order at a time.
+
+    Returns
+    -------
+    list[tuple[int, int, int]]
+        ``(start, end, rows)`` of each unit holding rows, in ascending order:
+        an interval of ``_COUNT_BLOCK`` row numbers, or a single row number
+        for an interval holding more than ``limit`` rows.
+    """
+    row = pl.col(column)
+    blocks = (
+        merged.filter(part)
+        .group_by(row // _COUNT_BLOCK)
+        .agg(pl.len())
+        .sort(column)
+        .collect(engine="streaming")
+    )
+    units: list[tuple[int, int, int]] = []
+    for block, rows in blocks.iter_rows():
+        start, end = block * _COUNT_BLOCK, (block + 1) * _COUNT_BLOCK
+        if rows <= limit:
+            units.append((start, end, rows))
+            continue
+        counts = (
+            merged.filter(part & (row >= start) & (row < end))
+            .group_by(row)
+            .agg(pl.len())
+            .sort(column)
+            .collect(engine="streaming")
+        )
+        units += [(number, number + 1, n) for number, n in counts.iter_rows()]
+    return units
 
 
 def _restore_ranges(
-    how: HOW, left_rows: int, right_rows: int, left_row: str, right_row: str
+    merged: pl.LazyFrame, how: HOW, left_row: str, right_row: str, limit: int
 ) -> list[tuple[pl.Expr, list[str]]]:
     """List the ranges of row numbers to put the merged rows back in order.
 
     Parameters
     ----------
+    merged : pl.LazyFrame
+        Merged rows of every bucket, with the row-number columns.
     how : HOW
         Join strategy of the merge.
-    left_rows, right_rows : int
-        Row counts of each side.
     left_row, right_row : str
         Names of the temporary row-number columns of each side.
+    limit : int
+        Most merged rows of one range, from ``_restore_limit``; a single row
+        number holding more rows is a range of its own.
 
     Returns
     -------
@@ -245,22 +349,18 @@ def _restore_ranges(
         For each range, in the order of the result, the filter that selects
         its merged rows and the row-number columns to sort them by.
     """
-    def ranges(rows: int, column: pl.Expr) -> list[pl.Expr]:
+    def ranges(part: pl.Expr, column: str, by: list[str]) -> list[tuple[pl.Expr, list[str]]]:
+        row = pl.col(column)
         return [
-            (column >= start) & (column < start + _RESTORE_ROWS)
-            for start in range(0, rows, _RESTORE_ROWS)
+            (part & (row >= start) & (row < end), by)
+            for start, end in _split_ranges(_count_units(merged, part, column, limit), limit)
         ]
 
     if how == "right":
-        return [
-            (cond, [right_row, left_row]) for cond in ranges(right_rows, pl.col(right_row))
-        ]
-    out = [(cond, [left_row, right_row]) for cond in ranges(left_rows, pl.col(left_row))]
+        return ranges(pl.col(right_row).is_not_null(), right_row, [right_row, left_row])
+    out = ranges(pl.col(left_row).is_not_null(), left_row, [left_row, right_row])
     if how == "full":
-        out += [
-            (pl.col(left_row).is_null() & cond, [right_row])
-            for cond in ranges(right_rows, pl.col(right_row))
-        ]
+        out += ranges(pl.col(left_row).is_null(), right_row, [right_row])
     return out
 
 
@@ -388,6 +488,14 @@ def merge_on_disk(
     wrote are deleted before the exception is raised, and no session is
     created.
 
+    With ``buckets >= 2``, the merged rows are put back in order about
+    1 GiB at a time, as ``estimated_size()`` measures it; sorting them makes
+    the peak about twice as large. The size of a row is measured on the
+    first 10,000 merged rows, so data whose later rows are much larger, such
+    as longer strings, can go beyond it. The rows that one input row gives
+    are always put back in order together, so a row that matches many rows
+    takes the memory of all its matches at once.
+
     Each call, whatever ``delete_on_exit`` is, also deletes, directly in
     the directory it uses, the files that ended processes registered there
     and left, for example because they were killed, with their session
@@ -471,11 +579,8 @@ def merge_on_disk(
 
             if merged_files:
                 merged = pl.scan_parquet(merged_files)
-                left_rows = _row_count([f for fs in left_files.values() for f in fs])
-                right_rows = _row_count([f for fs in right_files.values() for f in fs])
-                for cond, by in _restore_ranges(
-                    how, left_rows, right_rows, left_row, right_row
-                ):
+                limit = _restore_limit(merged)
+                for cond, by in _restore_ranges(merged, how, left_row, right_row, limit):
                     # Sorting the collected range uses less memory than
                     # sorting in the query; the range is freed before the
                     # next one is collected.

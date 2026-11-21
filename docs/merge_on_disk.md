@@ -120,7 +120,12 @@ print(out.collect().rows())
   returns, and everything the call wrote is deleted when it fails.
 - **Memory.** Collecting the whole returned frame loads the result into
   memory like any collect. For a large result, aggregate it, or write it with
-  a `sink_*` method.
+  a `sink_*` method. Inside the call, with `buckets` of 2 or more, the merged
+  rows are put back in order about 1 GiB at a time (about twice that at the
+  peak, while sorting). The size of a row is measured on the first 10,000
+  merged rows, so data whose later rows are much larger can go beyond it, and
+  the rows one input row gives are always handled together, so a row that
+  matches many rows takes the memory of all its matches at once.
 - **LazyFrames only.** Pass `df.lazy()` for a `DataFrame`; anything else
   raises a `TypeError`.
 - **Same rules as `merge`.** Null keys never match, duplicate keys multiply
