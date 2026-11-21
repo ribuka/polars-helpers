@@ -2,7 +2,8 @@
 
 Each Python block of a page runs, from top to bottom, in one namespace with
 an empty temporary folder as the working directory. A ``text`` block right
-after a Python block is the standard output that block must print.
+after a Python block is the standard output that block must print. The API
+table of ``README.md`` must link every public name to its page.
 """
 
 import contextlib
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import polars_helpers as plh
 from polars_helpers import _disk
 
 DOCS = Path(__file__).parents[1] / "docs"
@@ -152,6 +154,28 @@ def test_changed_page_fails(docs_env: Path) -> None:
     assert "{'x': 0.5, 'flag': True, 'label': None}" in text
     with pytest.raises(AssertionError):
         run_page(text.replace("{'x': 0.5, 'flag': True", "{'x': 9.5, 'flag': True", 1), page.name)
+
+
+README = DOCS.parent / "README.md"
+
+# A row of the API table of the README: its names, and the page it links to.
+_ROW = re.compile(r"^\| \[(?P<names>[^\]]+)\]\((?P<link>[^)]+)\) \|", re.MULTILINE)
+_LINK = re.compile(r"\]\((?P<link>[^)#:]+\.md)\)")
+
+
+def test_readme_links_every_public_name_to_its_page() -> None:
+    """Link every name of ``__all__`` from the API table, and every page."""
+    rows = list(_ROW.finditer(README.read_text(encoding="utf-8")))
+    linked = [name for row in rows for name in re.findall(r"`(\w+)`", row.group("names"))]
+    assert sorted(linked) == sorted(plh.__all__)
+    assert {row.group("link") for row in rows} == {f"docs/{page.name}" for page in PAGES}
+
+
+@pytest.mark.parametrize("page", [README, *PAGES], ids=["README.md", *(p.name for p in PAGES)])
+def test_relative_links_point_to_pages(page: Path) -> None:
+    """Point every relative Markdown link to a file that exists."""
+    for link in _LINK.findall(page.read_text(encoding="utf-8")):
+        assert (page.parent / link).is_file(), f"{page.name} links to missing {link}"
 
 
 def test_examples_pairs_blocks() -> None:
