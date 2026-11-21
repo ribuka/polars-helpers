@@ -490,14 +490,11 @@ def merge_on_disk(
             empty.write_parquet(result_file())
 
         # Registered only once every result file is written, so that a call
-        # that fails creates no session.
+        # that fails, even while registering, leaves no session files.
         if delete_on_exit is None:
             delete_on_exit = directory is None
         if delete_on_exit:
-            session = _disk.get_session(path)
-            session.register(results)
-            if directory is not None:
-                session.register_directories(created)
+            _disk.register_on_exit(path, results, created if directory is not None else ())
     except BaseException:
         shutil.rmtree(work, ignore_errors=True)
         _disk.delete_paths(results, created)

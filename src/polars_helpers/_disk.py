@@ -487,13 +487,7 @@ class Session:
         files : Iterable[Path]
             Files, in the root or under it.
         """
-        with self._mutex:
-            new = [str(f) for f in files if str(f) not in self._known]
-            if not new:
-                return
-            self._files.extend(new)
-            self._known.update(new)
-            self._save()
+        self._register(files, ())
 
     def register_directories(self, directories: Iterable[Path]) -> None:
         """Register directories to delete on exit once they are empty.
@@ -504,12 +498,49 @@ class Session:
             Directories, the innermost first, as ``make_directory`` returns
             them. They are deleted after the files and the session files.
         """
+        self._register((), directories)
+
+    def _register(self, files: Iterable[Path], directories: Iterable[Path]) -> None:
+        """Register files and directories in one write of the JSON file.
+
+        If the JSON file cannot be written, nothing of this call stays
+        registered and the error is raised.
+
+        Parameters
+        ----------
+        files : Iterable[Path]
+            Files, as for ``register``.
+        directories : Iterable[Path]
+            Directories, as for ``register_directories``.
+        """
         with self._mutex:
-            new = [str(d) for d in directories if str(d) not in self._directories]
-            if not new:
+            new_files = list(dict.fromkeys(str(f) for f in files if str(f) not in self._known))
+            new_directories = list(
+                dict.fromkeys(str(d) for d in directories if str(d) not in self._directories)
+            )
+            if not new_files and not new_directories:
                 return
-            self._directories.extend(new)
-            self._save()
+            self._files.extend(new_files)
+            self._known.update(new_files)
+            self._directories.extend(new_directories)
+            try:
+                self._save()
+            except BaseException:
+                del self._files[len(self._files) - len(new_files) :]
+                self._known.difference_update(new_files)
+                del self._directories[len(self._directories) - len(new_directories) :]
+                raise
+
+    def discard(self) -> None:
+        """Delete the session files of a session that nothing uses.
+
+        For a session that is not yet given out by ``get_session``, such as
+        one ``register_on_exit`` created and failed to register in.
+        """
+        with self._mutex:
+            self._closed = True
+        delete_paths([self.json_path])
+        unlock_and_delete(self._fd, self.lock_path)
 
     def at_exit(self, callback: Callable[[], None]) -> None:
         """Run a function on exit before the registered files are deleted.
@@ -621,6 +652,42 @@ def get_session(root: Path) -> Session:
             _sessions[key] = session
             atexit.register(session.close)
         return session
+
+
+def register_on_exit(
+    root: Path, files: Iterable[Path], directories: Iterable[Path] = ()
+) -> None:
+    """Register files and directories in the session of this process for a root.
+
+    Unlike ``get_session`` followed by ``Session.register``, a failure
+    leaves nothing behind: nothing of this call stays registered, and a
+    session this call created is deleted with its session files before the
+    error is raised, without being given to anyone else.
+
+    Parameters
+    ----------
+    root : Path
+        Absolute path of an existing root.
+    files : Iterable[Path]
+        Files to delete on exit, as for ``Session.register``.
+    directories : Iterable[Path], default ()
+        Directories to delete on exit once empty, as for
+        ``Session.register_directories``.
+    """
+    key = (os.getpid(), _root_key(root))
+    with _sessions_mutex:
+        session = _sessions.get(key)
+        if session is not None:
+            session._register(files, directories)
+            return
+        session = Session(root)
+        try:
+            session._register(files, directories)
+        except BaseException:
+            session.discard()
+            raise
+        _sessions[key] = session
+        atexit.register(session.close)
 
 
 def current_session_id(root: Path) -> str | None:

@@ -580,6 +580,72 @@ def test_merge_on_disk_cleans_up_after_failure(
     assert _disk.current_session_id(root) is None
 
 
+def _fail_saves_after(monkeypatch: pytest.MonkeyPatch, allowed: int) -> None:
+    """Make the JSON file of a session fail to be written after some writes.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Fixture used to patch ``Session._save``.
+    allowed : int
+        Number of writes that succeed.
+    """
+    real_save = _disk.Session._save
+    saves = 0
+
+    def save(self: _disk.Session) -> None:
+        nonlocal saves
+        saves += 1
+        if saves > allowed:
+            raise OSError("disk full")
+        real_save(self)
+
+    monkeypatch.setattr(_disk.Session, "_save", save)
+
+
+@pytest.mark.parametrize("use_default", [False, True], ids=["directory", "default"])
+def test_merge_on_disk_cleans_up_after_failed_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_cache: Path, use_default: bool
+) -> None:
+    """Delete the session it created when registering the result fails."""
+    (tmp_path / "keep.txt").write_text("keep")
+    directory = None if use_default else tmp_path / "out" / "sub"
+    root = _disk.default_root() if use_default else tmp_path / "out" / "sub"
+    _fail_saves_after(monkeypatch, 1)
+    with pytest.raises(OSError, match="disk full"):
+        plh.merge_on_disk(_FRAME, _FRAME, on="k", directory=directory, delete_on_exit=True)
+    assert [p.name for p in tmp_path.iterdir()] == ["keep.txt"]
+    assert list(isolated_cache.iterdir()) == []
+    assert _disk.current_session_id(root) is None
+
+
+def test_merge_on_disk_keeps_existing_session_after_failed_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the session and the earlier result when registering a later one fails."""
+    first = plh.merge_on_disk(_FRAME, _FRAME, on="k", directory=tmp_path, delete_on_exit=True)
+    session_id = _disk.current_session_id(tmp_path)
+    assert session_id is not None
+    first_names = {p.name for p in tmp_path.iterdir()}
+    real_save = _disk.Session._save
+    _fail_saves_after(monkeypatch, 0)
+    with pytest.raises(OSError, match="disk full"):
+        plh.merge_on_disk(_FRAME, _FRAME, on="k", directory=tmp_path, delete_on_exit=True)
+    assert {p.name for p in tmp_path.iterdir()} == first_names
+    assert _disk.current_session_id(tmp_path) == session_id
+    data = _disk.read_json(tmp_path / f"{_disk.SESSION_PREFIX}{session_id}.json")
+    assert data is not None
+    assert [Path(f).name for f in data["files"]] == [  # type: ignore[union-attr]
+        n for n in first_names if _RESULT.fullmatch(n)
+    ]
+    assert first.collect().equals(plh.merge(_FRAME, _FRAME, on="k").collect())
+
+    monkeypatch.setattr(_disk.Session, "_save", real_save)
+    plh.merge_on_disk(_FRAME, _FRAME, on="k", directory=tmp_path, delete_on_exit=True)
+    data = _disk.read_json(tmp_path / f"{_disk.SESSION_PREFIX}{session_id}.json")
+    assert data is not None and len(data["files"]) == 2  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("indicator", ["_merge", None])
 @pytest.mark.parametrize("buckets", [1, 4])
 def test_merge_on_disk_verbose_matches_merge(
