@@ -1,8 +1,9 @@
-# `merge` and `HOW`
+# `merge`, `HOW`, and `VALIDATE`
 
 Join two frames like `pandas.merge`: the keys of both sides become one set of
 key columns, a `_merge` column tells where each row came from, and the row
-order is fixed. `HOW` is the type of the join strategies it accepts.
+order is fixed. `HOW` is the type of the join strategies it accepts, and
+`VALIDATE` the type of the key relations its `validate` argument checks.
 
 See the docstring for every argument.
 
@@ -73,6 +74,58 @@ print(out.rows())
 [(3, 'c', None), (1, 'a', 100), (2, 'b', 200)]
 ```
 
+## Checking that keys are unique
+
+`validate` checks the keys before merging, whatever `how` is, and raises a
+`ValueError` that names the sides whose keys are not unique, how many key
+values appear more than once, and the first five of them by key:
+
+| `validate` | Keys that must be unique |
+|---|---|
+| `"m:m"` (default) | none; nothing is checked |
+| `"1:m"` | left |
+| `"m:1"` | right |
+| `"1:1"` | left and right |
+
+```python
+print(typing.get_args(plh.VALIDATE))
+try:
+    plh.merge(left, right, on="id", validate="m:1")
+except ValueError as error:
+    print(error)
+```
+
+```text
+('m:m', '1:m', 'm:1', '1:1')
+validate='m:1': the keys of right are not unique
+right keys ['id']: 1 key values appear more than once; the first 1 by key:
+shape: (1, 2)
+┌─────┬───────┐
+│ id  ┆ count │
+│ --- ┆ ---   │
+│ i64 ┆ u32   │
+╞═════╪═══════╡
+│ 1   ┆ 2     │
+└─────┴───────┘
+```
+
+Once the keys are unique, the merge goes on as without `validate`:
+
+```python
+latest = right.unique("id", keep="last", maintain_order=True)
+print(plh.merge(left, latest, on="id", validate="1:1").rows())
+```
+
+```text
+[(3, 'c', None, 'left_only'), (1, 'a', 11, 'both'), (2, 'b', None, 'left_only')]
+```
+
+- Rows with a null in any key column are not counted, as null keys match no
+  row and never multiply rows.
+- The check runs in the call, for `LazyFrame`s too: only the counts and the
+  examples of the duplicated keys are collected, which reads the inputs once
+  more. The returned `LazyFrame` stays unevaluated. `"m:m"` reads nothing.
+
 ## LazyFrames
 
 Two `LazyFrame`s give a `LazyFrame`, with the same row order once collected.
@@ -109,7 +162,7 @@ out = plh.merge(left, right, on="id", indicator=None, verbose=True)
   with each other, a null key is `left_only` or `right_only`.
 - **Duplicate keys multiply rows.** Each left row appears once for every
   matching right row, as `id` 1 does above, so the result can be longer than
-  `left`.
+  `left`. Pass `validate` to make sure it does not happen.
 - **The indicator name must be free.** If a column named like `indicator`
   (`_merge` by default) already exists, a `ValueError` is raised.
 - **Memory.** The join runs in memory when you collect. For frames too large

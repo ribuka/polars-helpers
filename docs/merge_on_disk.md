@@ -6,7 +6,7 @@ files, and a `pl.LazyFrame` that reads them is returned.
 
 It accepts only `pl.LazyFrame` and always returns a `pl.LazyFrame`. The
 arguments of `merge` (`on`, `left_on` / `right_on`, `columns`, `how`,
-`indicator`, `verbose`) work the same way. See the docstring for every
+`indicator`, `validate`, `verbose`) work the same way. See the docstring for every
 argument.
 
 ## Try it
@@ -138,3 +138,11 @@ print(out.collect().rows())
   raises a `TypeError`.
 - **Same rules as `merge`.** Null keys never match, duplicate keys multiply
   rows, and the indicator name must not be a column already.
+- **`validate`.** It raises the same `ValueError` as with `merge`. With
+  `buckets=1`, both sides are checked with the streaming engine before
+  anything is written, and the memory grows with the number of distinct keys.
+  With `buckets` of 2 or more, the keys are checked a bucket at a time, once
+  both sides are split into buckets and before any bucket is merged: the
+  memory is that of one bucket, but the error comes only after the split
+  (about 4 s after the call with 30 million rows on each side). Everything
+  the call wrote is deleted before the error is raised.

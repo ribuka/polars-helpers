@@ -31,6 +31,7 @@ See the docstrings for arguments and details.
 | [`merge`](docs/merge.md) | Join two frames like `pandas.merge`, with coalesced keys, an indicator column, and a deterministic row order (pandas-compatible except for `how="full"`). |
 | [`merge_on_disk`](docs/merge_on_disk.md) | Get the same result as `merge` with little memory by keeping the intermediate data on disk; the result is written to Parquet and returned as a `LazyFrame` that reads it. Accepts only `LazyFrame`. |
 | [`HOW`](docs/merge.md) | The join strategies `merge` accepts. |
+| [`VALIDATE`](docs/merge.md) | The key relations `merge` and `merge_on_disk` can check with `validate`. |
 | [`scan_parquet_relaxed`](docs/scan_parquet_relaxed.md) | Stack Parquet files whose columns and types differ, like `diagonal_relaxed`, with little memory, by preparing their columns on disk; returns a `LazyFrame`. |
 | [`get_shape`](docs/get_shape.md) | `(rows, columns)`. |
 | [`get_columns`](docs/get_columns.md) | Column names. |

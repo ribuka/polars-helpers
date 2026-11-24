@@ -7,6 +7,7 @@ def test_public_api_exports_every_name() -> None:
     """Expose every name listed in ``__all__`` and nothing else by design."""
     assert sorted(plh.__all__) == [
         "HOW",
+        "VALIDATE",
         "drop_all_null_columns",
         "drop_nested_type_columns",
         "get_columns",
