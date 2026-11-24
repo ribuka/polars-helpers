@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, get_args
 
 import polars as pl
 
 from .info import _value_counts_query, get_columns
 
+if TYPE_CHECKING:
+    from polars._typing import EngineType
+
 HOW = Literal["left", "right", "full", "inner"]
+
+# Key relations ``merge`` can check, as with ``polars.DataFrame.join``: the
+# side written ``1`` must have unique keys, and ``"m:m"`` checks nothing.
+VALIDATE = Literal["m:m", "1:m", "m:1", "1:1"]
+
+# Most duplicated key values shown in the error of a failed ``validate``.
+_EXAMPLES = 5
 
 # Temporary flags marking the rows of each side; named so they do not clash
 # with the columns of the frames being merged.
@@ -81,6 +91,200 @@ def _resolve_keys(
     if not left_on or not right_on:
         raise ValueError("`left_on` and `right_on` must be specified if `on` is None")
     return _as_list(left_on), _as_list(right_on)
+
+
+def _check_validate(validate: object) -> None:
+    """Reject a ``validate`` value that is not one of ``VALIDATE``.
+
+    Parameters
+    ----------
+    validate : object
+        Value given as ``validate``.
+
+    Raises
+    ------
+    ValueError
+        If ``validate`` is not one of ``"m:m"``, ``"1:m"``, ``"m:1"``, and
+        ``"1:1"``.
+    """
+    values = get_args(VALIDATE)
+    if not isinstance(validate, str) or validate not in values:
+        raise ValueError(
+            f"validate must be one of {', '.join(map(repr, values))}, got {validate!r}"
+        )
+
+
+def _unique_sides(validate: VALIDATE) -> tuple[bool, bool]:
+    """Tell which sides must have unique keys.
+
+    Parameters
+    ----------
+    validate : VALIDATE
+        Key relation to check.
+
+    Returns
+    -------
+    tuple[bool, bool]
+        Whether the left keys and whether the right keys must be unique.
+    """
+    return validate in ("1:m", "1:1"), validate in ("m:1", "1:1")
+
+
+def _count_name(keys: list[str]) -> str:
+    """Choose the name of the count column of the duplicated keys.
+
+    Parameters
+    ----------
+    keys : list[str]
+        Key columns of one side.
+
+    Returns
+    -------
+    str
+        ``"count"``, or the first of ``"count_0"``, ``"count_1"``, ... that
+        is not a key column.
+    """
+    name, n = "count", 0
+    while name in keys:
+        name, n = f"count_{n}", n + 1
+    return name
+
+
+def _duplicate_key_queries(
+    frame: pl.LazyFrame, keys: list[str]
+) -> tuple[pl.LazyFrame, pl.LazyFrame]:
+    """Build the number and the first examples of the duplicated keys.
+
+    Rows with a null in any key column are left out: they match no row, so
+    they never multiply rows.
+
+    Parameters
+    ----------
+    frame : pl.LazyFrame
+        One side of the merge.
+    keys : list[str]
+        Key columns of that side.
+
+    Returns
+    -------
+    tuple[pl.LazyFrame, pl.LazyFrame]
+        Unevaluated queries of a one-value frame with the number of key
+        values that appear more than once, and of the first ``_EXAMPLES`` of
+        them by key with their number of rows, in the column ``_count_name``
+        names.
+    """
+    count = _count_name(keys)
+    duplicated = (
+        frame.select(keys)
+        .drop_nulls()
+        .group_by(keys)
+        .len(name=count)
+        .filter(pl.col(count) > 1)
+    )
+    return duplicated.select(pl.len()), duplicated.sort(keys).head(_EXAMPLES)
+
+
+def _first_examples(examples: list[pl.DataFrame], keys: list[str]) -> pl.DataFrame:
+    """Merge the examples of duplicated keys found in parts of one side.
+
+    Parameters
+    ----------
+    examples : list[pl.DataFrame]
+        Examples from ``_duplicate_key_queries`` of each part, at least one;
+        each key value is in one part only.
+    keys : list[str]
+        Key columns of that side.
+
+    Returns
+    -------
+    pl.DataFrame
+        The first ``_EXAMPLES`` examples of all the parts by key.
+    """
+    return pl.concat(examples).sort(keys).head(_EXAMPLES)
+
+
+def _raise_if_not_unique(
+    validate: VALIDATE, checks: list[tuple[str, list[str], int, pl.DataFrame]]
+) -> None:
+    """Raise if a side that must have unique keys has duplicated keys.
+
+    Parameters
+    ----------
+    validate : VALIDATE
+        Key relation checked.
+    checks : list[tuple[str, list[str], int, pl.DataFrame]]
+        For each side checked, left first: its name (``"left"`` or
+        ``"right"``), its key columns, the number of key values that appear
+        more than once, and the first examples of them by key.
+
+    Raises
+    ------
+    ValueError
+        If any side checked has duplicated keys; the message names every
+        such side with its count and examples.
+    """
+    failed = [check for check in checks if check[2]]
+    if not failed:
+        return
+    sides = " and ".join(side for side, *_ in failed)
+    lines = [f"validate={validate!r}: the keys of {sides} are not unique"]
+    for side, keys, n, examples in failed:
+        lines.append(
+            f"{side} keys {keys}: {n} key values appear more than once;"
+            f" the first {examples.height} by key:"
+        )
+        lines.append(str(examples))
+    raise ValueError("\n".join(lines))
+
+
+def _check_unique_keys[FrameT: (pl.DataFrame, pl.LazyFrame)](
+    left: FrameT,
+    right: FrameT,
+    left_keys: list[str],
+    right_keys: list[str],
+    validate: VALIDATE,
+    engine: EngineType = "auto",
+) -> None:
+    """Check that the keys of the sides ``validate`` names are unique.
+
+    Only the counts and the examples of the duplicated keys are collected,
+    all in one ``pl.collect_all``; ``"m:m"`` collects nothing.
+
+    Parameters
+    ----------
+    left, right : pl.DataFrame | pl.LazyFrame
+        Frames to merge, of the same kind.
+    left_keys, right_keys : list[str]
+        Key columns of each side.
+    validate : VALIDATE
+        Key relation to check.
+    engine : EngineType, default "auto"
+        Engine that collects the queries.
+
+    Raises
+    ------
+    ValueError
+        If a side that must have unique keys has duplicated keys.
+    """
+    unique_left, unique_right = _unique_sides(validate)
+    sides: list[tuple[str, FrameT, list[str]]] = []
+    if unique_left:
+        sides.append(("left", left, left_keys))
+    if unique_right:
+        sides.append(("right", right, right_keys))
+    if not sides:
+        return
+    queries = [
+        q for _, frame, keys in sides for q in _duplicate_key_queries(frame.lazy(), keys)
+    ]
+    results = pl.collect_all(queries, engine=engine)
+    _raise_if_not_unique(
+        validate,
+        [
+            (name, keys, results[2 * i].item(), results[2 * i + 1])
+            for i, (name, _, keys) in enumerate(sides)
+        ],
+    )
 
 
 def _with_flag[FrameT: (pl.DataFrame, pl.LazyFrame)](
@@ -208,6 +412,7 @@ def merge[FrameT: (pl.DataFrame, pl.LazyFrame)](
     right_on: str | list[str] | None = None,
     how: HOW = "left",
     indicator: str | None = "_merge",
+    validate: VALIDATE = "m:m",
     verbose: bool = False,
 ) -> FrameT:
     """Merge two same-kind polars frames like ``pandas.merge``.
@@ -239,6 +444,15 @@ def merge[FrameT: (pl.DataFrame, pl.LazyFrame)](
     indicator : str | None, default "_merge"
         Name of the merge-origin column holding ``"both"``, ``"left_only"``,
         or ``"right_only"``. ``None`` omits the column.
+    validate : VALIDATE, default "m:m"
+        Key relation to check before merging, whatever ``how`` is: ``"1:m"``
+        requires unique left keys, ``"m:1"`` unique right keys, ``"1:1"``
+        both, and ``"m:m"`` checks nothing. Rows with a null in any key
+        column are left out, as they match no row. The check runs in this
+        call, for ``pl.LazyFrame`` too: only the counts and the first five
+        duplicated keys of each side checked are collected, which reads the
+        inputs once more, and the returned ``pl.LazyFrame`` stays
+        unevaluated.
     verbose : bool, default False
         Whether to print the shape change and the merge-origin counts, which
         is intended for interactive notebook use.
@@ -255,13 +469,18 @@ def merge[FrameT: (pl.DataFrame, pl.LazyFrame)](
         ``pl.LazyFrame``.
     ValueError
         If the keys are not given as either ``on`` or both ``left_on`` and
-        ``right_on``, or if ``indicator`` names an existing column.
+        ``right_on``, if ``indicator`` names an existing column, if
+        ``validate`` is not one of ``VALIDATE``, or if the keys of a side
+        that ``validate`` requires to be unique are not; the message names
+        each such side, its number of duplicated key values, and the first
+        five of them by key with their number of rows.
     """
     if not isinstance(left, pl.DataFrame | pl.LazyFrame) or type(left) is not type(right):
         raise TypeError(
             f"left: {type(left)} and right: {type(right)} must be the same type,"
             " either polars.DataFrame or polars.LazyFrame"
         )
+    _check_validate(validate)
 
     left_keys, right_keys = _resolve_keys(on, left_on, right_on)
 
@@ -270,6 +489,8 @@ def merge[FrameT: (pl.DataFrame, pl.LazyFrame)](
 
     if indicator is not None and indicator in {*get_columns(left), *get_columns(right)}:
         raise ValueError(f"indicator column {indicator!r} already exists")
+
+    _check_unique_keys(left, right, left_keys, right_keys, validate)
 
     out = _join_with_indicator(left, right, left_keys, right_keys, how, indicator)
 

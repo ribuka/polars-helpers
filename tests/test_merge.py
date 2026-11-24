@@ -1,5 +1,7 @@
 """Tests for merging two frames with a merge-origin indicator."""
 
+import re
+
 import polars as pl
 import pytest
 
@@ -267,3 +269,130 @@ def test_merge_requires_one_way_of_giving_keys(
     """Accept either ``on`` or both ``left_on`` and ``right_on``."""
     with pytest.raises(ValueError, match=message):
         plh.merge(left, right, **keys)  # ty:ignore[invalid-argument-type]
+
+
+_UNIQUE = [1, 2, 3]
+_DUPLICATED = [1, 1, 2]
+
+
+@pytest.mark.parametrize("validate", ["m:m", "1:m", "m:1", "1:1"])
+@pytest.mark.parametrize(
+    ("left_keys", "right_keys"),
+    [
+        (_UNIQUE, _UNIQUE),
+        (_DUPLICATED, _UNIQUE),
+        (_UNIQUE, _DUPLICATED),
+        (_DUPLICATED, _DUPLICATED),
+    ],
+    ids=["none", "left", "right", "both"],
+)
+def test_merge_validate_checks_the_sides_it_names(
+    validate: plh.VALIDATE, left_keys: list[int], right_keys: list[int]
+) -> None:
+    """Raise only when a side that ``validate`` names has duplicated keys."""
+    left = pl.DataFrame({"k": left_keys, "a": [1, 2, 3]})
+    right = pl.DataFrame({"k": right_keys, "b": [4, 5, 6]})
+    must_left = validate in ("1:m", "1:1")
+    must_right = validate in ("m:1", "1:1")
+    fails = (must_left and left_keys == _DUPLICATED) or (
+        must_right and right_keys == _DUPLICATED
+    )
+    if fails:
+        with pytest.raises(ValueError, match=f"validate={validate!r}: the keys of"):
+            plh.merge(left, right, on="k", validate=validate)
+    else:
+        expected = plh.merge(left, right, on="k")
+        assert plh.merge(left, right, on="k", validate=validate).equals(expected)
+
+
+@pytest.mark.parametrize("how", ["left", "right", "full", "inner"])
+def test_merge_validate_checks_whatever_how_is(how: plh.HOW) -> None:
+    """Check the keys for every join strategy."""
+    left = pl.DataFrame({"k": [5, 6]})
+    right = pl.DataFrame({"k": [1, 1]})
+    with pytest.raises(ValueError, match="the keys of right are not unique"):
+        plh.merge(left, right, on="k", how=how, validate="m:1")
+
+
+def test_merge_validate_leaves_out_null_keys() -> None:
+    """Do not count rows with a null key, which match no row."""
+    left = pl.DataFrame({"k": [1, None, None], "j": [1, 2, 2]})
+    right = pl.DataFrame({"k": [1, None, None], "j": [None, 2, 2], "b": [1, 2, 3]})
+    for keys in ["k", ["k", "j"]]:
+        expected = plh.merge(left, right, on=keys)
+        assert plh.merge(left, right, on=keys, validate="1:1").equals(expected)
+
+
+def _examples(name: str, values: list[int], counts: list[int]) -> str:
+    """Render the examples table of a failed ``validate``.
+
+    Parameters
+    ----------
+    name : str
+        Name of the key column.
+    values : list[int]
+        Duplicated key values.
+    counts : list[int]
+        Number of rows of each value.
+
+    Returns
+    -------
+    str
+        The table as the error message shows it.
+    """
+    return str(
+        pl.DataFrame(
+            {name: values, "count": counts},
+            schema={name: pl.Int64, "count": pl.get_index_type()},
+        )
+    )
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_merge_validate_message_names_every_side(lazy: bool) -> None:
+    """Name both sides with their counts and the first five keys by key."""
+    left = pl.DataFrame({"id": [9, 9, 8, 8, 8, 7, 7, 1, 1, 2, 2, 3, 3, 4, None, None]})
+    right = pl.DataFrame({"key": [5, 5, 3, 0], "b": [1, 2, 3, 4]})
+    frames = (left.lazy(), right.lazy()) if lazy else (left, right)
+    with pytest.raises(ValueError) as info:
+        plh.merge(*frames, left_on="id", right_on="key", validate="1:1")
+
+    assert str(info.value) == "\n".join(
+        [
+            "validate='1:1': the keys of left and right are not unique",
+            "left keys ['id']: 6 key values appear more than once; the first 5 by key:",
+            _examples("id", [1, 2, 3, 7, 8], [2, 2, 2, 2, 3]),
+            "right keys ['key']: 1 key values appear more than once; the first 1 by key:",
+            _examples("key", [5], [2]),
+        ]
+    )
+
+
+def test_merge_validate_names_the_count_after_the_keys() -> None:
+    """Name the count column ``count_0`` when a key is named ``count``."""
+    left = pl.DataFrame({"count": [1, 1]})
+    with pytest.raises(ValueError) as info:
+        plh.merge(left, left, on="count", validate="1:m")
+    assert "count_0" in str(info.value)
+
+
+@pytest.mark.parametrize("value", [None, "one_to_one", "1:n"])
+def test_merge_rejects_unknown_validate(
+    left: pl.DataFrame, right: pl.DataFrame, value: object
+) -> None:
+    """Accept only the values of ``VALIDATE``."""
+    message = f"validate must be one of 'm:m', '1:m', 'm:1', '1:1', got {value!r}"
+    with pytest.raises(ValueError, match=re.escape(message)):
+        plh.merge(left, right, on="k", validate=value)  # ty:ignore[invalid-argument-type]
+
+
+def test_merge_validate_checks_lazy_frames_in_the_call() -> None:
+    """Raise in the call for LazyFrames, and keep a passing merge lazy."""
+    left = pl.LazyFrame({"k": [1, 1], "a": [1, 2]})
+    right = pl.LazyFrame({"k": [1, 2], "b": [3, 4]})
+    with pytest.raises(ValueError, match="the keys of left are not unique"):
+        plh.merge(left, right, on="k", validate="1:1")
+
+    out = plh.merge(left, right, on="k", validate="m:1")
+    assert isinstance(out, pl.LazyFrame)
+    assert out.collect().equals(plh.merge(left, right, on="k").collect())

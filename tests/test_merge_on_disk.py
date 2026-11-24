@@ -416,8 +416,21 @@ _FRAME = pl.LazyFrame({"k": [1, 2], "a": [1, 2]})
             _expected_join_error(),
             None,
         ),
+        *(
+            (
+                lambda d, value=value: plh.merge_on_disk(
+                    _FRAME, _FRAME, on="k", validate=value, directory=d  # ty:ignore[invalid-argument-type]
+                ),
+                ValueError,
+                re.escape(f"validate must be one of 'm:m', '1:m', 'm:1', '1:1', got {value!r}"),
+            )
+            for value in [None, "one_to_one", "1:n"]
+        ),
     ],
-    ids=["dataframe", "buckets", "keys", "indicator", "key_types"],
+    ids=[
+        "dataframe", "buckets", "keys", "indicator", "key_types",
+        "validate_none", "validate_long_name", "validate_unknown",
+    ],
 )
 def test_merge_on_disk_rejects_before_writing(
     tmp_path: Path,
@@ -902,3 +915,56 @@ def test_merge_on_disk_keeps_relative_directory_after_chdir(tmp_path: Path) -> N
     subprocess.run([sys.executable, "-c", code], check=True)
     assert list(first.iterdir()) == []
     assert list(second.iterdir()) == []
+
+
+def _duplicated_on_both_sides() -> tuple[pl.LazyFrame, pl.LazyFrame]:
+    """Build two sides whose keys are duplicated in several buckets.
+
+    Returns
+    -------
+    tuple[pl.LazyFrame, pl.LazyFrame]
+        Left keyed by ``id`` with 20 duplicated values and nulls, and right
+        keyed by ``key`` with 2 duplicated values.
+    """
+    ids = [*range(40), *range(0, 40, 2), None, None]
+    left = pl.LazyFrame({"id": ids, "a": list(range(len(ids)))})
+    right = pl.LazyFrame({"key": [1, 1, 3, 5, 5, 7], "b": list(range(6))})
+    return left, right
+
+
+@pytest.mark.parametrize("buckets", [1, 16])
+def test_merge_on_disk_validate_fails_like_merge(tmp_path: Path, buckets: int) -> None:
+    """Raise the message of ``merge`` and leave nothing behind."""
+    left, right = _duplicated_on_both_sides()
+    keys = {"left_on": "id", "right_on": "key"}
+    with pytest.raises(ValueError) as expected:
+        plh.merge(left, right, validate="1:1", **keys)  # ty:ignore[invalid-argument-type]
+
+    directory = tmp_path / "out"
+    with pytest.raises(ValueError) as got:
+        plh.merge_on_disk(
+            left, right, validate="1:1", directory=directory, buckets=buckets, **keys  # ty:ignore[invalid-argument-type]
+        )
+
+    assert str(got.value) == str(expected.value)
+    assert "left and right" in str(got.value)
+    if buckets == 1:
+        assert not directory.exists()
+    else:
+        assert not directory.exists() or not any(directory.iterdir())
+
+
+@pytest.mark.parametrize("buckets", [1, 16])
+@pytest.mark.parametrize("validate", ["1:m", "m:1", "1:1"])
+def test_merge_on_disk_validate_passes_like_merge(
+    tmp_path: Path, buckets: int, validate: plh.VALIDATE
+) -> None:
+    """Merge as without ``validate`` when the keys are unique."""
+    left = pl.LazyFrame({"k": [3, 1, None, None, 2], "a": list(range(5))})
+    right = pl.LazyFrame({"k": [2, 4, 1, None, None], "b": list(range(5))})
+    expected = plh.merge(left, right, on="k", how="full").collect()
+    got = plh.merge_on_disk(
+        left, right, on="k", how="full", validate=validate,
+        directory=tmp_path / "out", buckets=buckets,
+    ).collect()
+    assert got.equals(expected)

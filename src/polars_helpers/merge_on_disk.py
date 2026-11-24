@@ -9,7 +9,18 @@ from pathlib import Path
 import polars as pl
 
 from . import _disk
-from .merge import HOW, _print_summary, _resolve_keys, merge
+from .merge import (
+    HOW,
+    VALIDATE,
+    _check_unique_keys,
+    _duplicate_key_queries,
+    _first_examples,
+    _print_summary,
+    _raise_if_not_unique,
+    _resolve_keys,
+    _unique_sides,
+    merge,
+)
 
 # Base names of the temporary row numbers of each side and of the partition
 # key holding the bucket of each row; ``_temporary_names`` adds a suffix when
@@ -224,6 +235,51 @@ def _partition(
     return files
 
 
+def _check_unique_bucket_keys(
+    left_files: dict[int, list[Path]],
+    right_files: dict[int, list[Path]],
+    left_keys: list[str],
+    right_keys: list[str],
+    validate: VALIDATE,
+) -> None:
+    """Check that the keys ``validate`` names are unique, a bucket at a time.
+
+    Equal keys are in one bucket, so the counts and the examples of the
+    duplicated keys of every bucket add up to those of the whole side, as
+    ``merge`` finds them.
+
+    Parameters
+    ----------
+    left_files, right_files : dict[int, list[Path]]
+        Files of each bucket of each side, from ``_partition``.
+    left_keys, right_keys : list[str]
+        Key columns of each side.
+    validate : VALIDATE
+        Key relation to check.
+
+    Raises
+    ------
+    ValueError
+        If a side that must have unique keys has duplicated keys, with the
+        message of ``merge``.
+    """
+    checks: list[tuple[str, list[str], int, pl.DataFrame]] = []
+    sides = (("left", left_files, left_keys), ("right", right_files, right_keys))
+    for (name, files, keys), unique in zip(sides, _unique_sides(validate), strict=True):
+        if not unique:
+            continue
+        count, examples = 0, []
+        for bucket_files in files.values():
+            n, first = pl.collect_all(
+                _duplicate_key_queries(pl.scan_parquet(bucket_files), keys), engine="streaming"
+            )
+            count += n.item()
+            examples.append(first)
+        if count:
+            checks.append((name, keys, count, _first_examples(examples, keys)))
+    _raise_if_not_unique(validate, checks)
+
+
 def _scan(files: list[Path], schema: pl.Schema) -> pl.LazyFrame:
     """Read the files of one bucket, or an empty frame if there are none.
 
@@ -430,6 +486,7 @@ def merge_on_disk(
     right_on: str | list[str] | None = None,
     how: HOW = "left",
     indicator: str | None = "_merge",
+    validate: VALIDATE = "m:m",
     verbose: bool = False,
     *,
     directory: str | Path | None = None,
@@ -475,6 +532,14 @@ def merge_on_disk(
     indicator : str | None, default "_merge"
         Name of the merge-origin column holding ``"both"``, ``"left_only"``,
         or ``"right_only"``. ``None`` omits the column.
+    validate : VALIDATE, default "m:m"
+        Key relation to check before merging, as ``merge`` checks it and
+        with the same error. With ``buckets=1``, both sides are checked with
+        the streaming engine before anything is written; the memory grows
+        with the number of distinct keys. With ``buckets >= 2``, each bucket
+        is checked once both sides are split into buckets and before any
+        bucket is merged, so the memory is that of one bucket; on 30 million
+        rows on each side, the error came about 4 s after the call.
     verbose : bool, default False
         Whether to print the shape change and the merge-origin counts, as
         ``merge`` does, counted from the written result.
@@ -532,8 +597,9 @@ def merge_on_disk(
     ValueError
         If ``buckets`` is not a positive integer, if the keys are not given
         as either ``on`` or both ``left_on`` and ``right_on``, if
-        ``indicator`` names an existing column, or if ``directory`` is an
-        empty string.
+        ``indicator`` names an existing column, if ``validate`` is not one
+        of ``VALIDATE``, if the keys of a side that ``validate`` requires to
+        be unique are not, or if ``directory`` is an empty string.
     NotADirectoryError
         If ``directory`` is an existing file.
     OSError
@@ -543,9 +609,11 @@ def merge_on_disk(
     -----
     Key types that cannot be joined raise the same exception as collecting
     ``merge`` of the empty frames. Every check is done before anything is
-    written. If the merge fails midway, the files and directories this call
-    wrote are deleted before the exception is raised, and no session is
-    created.
+    written, except the uniqueness of the keys ``validate`` requires with
+    ``buckets >= 2``, which is checked once both sides are split into
+    buckets. If the merge fails midway, or the keys are not unique, the
+    files and directories this call wrote are deleted before the exception
+    is raised, and no session is created.
 
     With ``buckets >= 2``, the merged rows are put back in order about
     1 GiB at a time, as ``estimated_size()`` measures it; sorting them makes
@@ -577,8 +645,14 @@ def merge_on_disk(
         raise ValueError(f"buckets must be a positive integer, got {buckets!r}")
 
     empty = merge(
-        left.clear(), right.clear(), columns, on, left_on, right_on, how, indicator
+        left.clear(), right.clear(), columns, on, left_on, right_on, how, indicator, validate
     ).collect()
+
+    left_keys, right_keys = _resolve_keys(on, left_on, right_on)
+    if columns is not None:
+        right = right.select(*right_keys, *(c for c in columns if c not in right_keys))
+    if buckets == 1:
+        _check_unique_keys(left, right, left_keys, right_keys, validate, engine="streaming")
 
     path = _disk.resolve_root(directory)
     created = _disk.make_directory(path)
@@ -593,9 +667,6 @@ def merge_on_disk(
         return file
 
     try:
-        left_keys, right_keys = _resolve_keys(on, left_on, right_on)
-        if columns is not None:
-            right = right.select(*right_keys, *(c for c in columns if c not in right_keys))
         dtypes = _common_key_dtypes(left, right, left_keys, right_keys)
 
         def join(left_part: pl.LazyFrame, right_part: pl.LazyFrame) -> pl.LazyFrame:
@@ -628,6 +699,7 @@ def merge_on_disk(
                 _bucket_expr(right_keys, dtypes, buckets, bucket_name),
                 work / "right",
             )
+            _check_unique_bucket_keys(left_files, right_files, left_keys, right_keys, validate)
 
             left_schema = left.with_row_index(left_row).collect_schema()
             right_schema = right.with_row_index(right_row).collect_schema()

@@ -16,12 +16,13 @@ from .info import (
     get_value_counts,
 )
 from .io import read_csv, safe_write_csv, scan_csv
-from .merge import HOW, merge
+from .merge import HOW, VALIDATE, merge
 from .merge_on_disk import merge_on_disk
 from .parquet import scan_parquet_relaxed
 
 __all__ = [
     "HOW",
+    "VALIDATE",
     "drop_all_null_columns",
     "drop_nested_type_columns",
     "get_columns",
