@@ -351,7 +351,7 @@ def _examples(name: str, values: list[int], counts: list[int]) -> str:
 @pytest.mark.parametrize("lazy", [False, True])
 def test_merge_validate_message_names_every_side(lazy: bool) -> None:
     """Name both sides with their counts and the first five keys by key."""
-    left = pl.DataFrame({"id": [9, 9, 8, 8, 8, 7, 7, 1, 1, 2, 2, 3, 4, None, None]})
+    left = pl.DataFrame({"id": [9, 9, 8, 8, 8, 7, 7, 1, 1, 2, 2, 3, 3, 4, None, None]})
     right = pl.DataFrame({"key": [5, 5, 3, 0], "b": [1, 2, 3, 4]})
     frames = (left.lazy(), right.lazy()) if lazy else (left, right)
     with pytest.raises(ValueError) as info:
@@ -360,8 +360,8 @@ def test_merge_validate_message_names_every_side(lazy: bool) -> None:
     assert str(info.value) == "\n".join(
         [
             "validate='1:1': the keys of left and right are not unique",
-            "left keys ['id']: 5 key values appear more than once; the first 5 by key:",
-            _examples("id", [1, 2, 7, 8, 9], [2, 2, 2, 3, 2]),
+            "left keys ['id']: 6 key values appear more than once; the first 5 by key:",
+            _examples("id", [1, 2, 3, 7, 8], [2, 2, 2, 2, 3]),
             "right keys ['key']: 1 key values appear more than once; the first 1 by key:",
             _examples("key", [5], [2]),
         ]
